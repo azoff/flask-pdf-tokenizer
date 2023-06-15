@@ -4,7 +4,9 @@ services:
 
   server:
     image: azoff/flask-pdf-tokenizer
-    build: .
+    build:
+      context: .
+      target: local
     env_file: .env
     ports:
       - 8000:8000
