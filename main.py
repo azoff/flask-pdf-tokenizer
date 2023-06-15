@@ -3,6 +3,8 @@ import logging
 import re
 import pydantic
 import tiktoken
+import redis
+import os
 from fastapi import FastAPI
 from urllib.request import urlretrieve
 from pdfminer.high_level import extract_text
@@ -18,7 +20,7 @@ class TruncateRequest(Request):
 logging.basicConfig(level=logging.INFO)
 
 app = FastAPI()
-cache = {}
+cache = redis.Redis(host=os.getenv('REDIS_HOST'), port=6379, decode_responses=True)
 
 @app.get("/")
 def index():
@@ -48,18 +50,18 @@ def download_pdf_and_extract_text(url: str, extra_context: str = '') -> str:
 	global cache
 
 	# hash the inputs into a cache key
-	cache_key = str(hash((url, extra_context)))
-	if (cache_key in cache and cache[cache_key] is not None):
+	cache_key = f"pdf:{hash((url, extra_context))}:text"
+	text = cache.get(cache_key)
+	if (text is not None):
 		logging.info(f"Using cache for {url}...")
-		return cache[cache_key]
+		return text
 	
-	text = ''
 	with tempfile.NamedTemporaryFile() as temp:
 		download_pdf(url, temp.name)
-		text = extract_text(temp.name)
+		text = f"{extra_context}{text}"
 	
-	cache[cache_key] = f"{extra_context}{text}"
-	return cache[cache_key]
+	cache.set(cache_key, text)
+	return text
 
 def download_pdf(url, output_path):
 	logging.info(f"Downloading PDF from {url}...")
