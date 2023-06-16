@@ -2,11 +2,16 @@ version: "3.8"
 
 services:
 
+  redis:
+    image: redis:alpine
+
   server:
     image: azoff/flask-pdf-tokenizer
     build:
       context: .
       target: local
+    environment:
+      - REDIS_HOST=redis
     ports:
       - 8000:8000
     volumes:

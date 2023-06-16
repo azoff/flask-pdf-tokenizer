@@ -58,6 +58,7 @@ def download_pdf_and_extract_text(url: str, extra_context: str = '') -> str:
 	
 	with tempfile.NamedTemporaryFile() as temp:
 		download_pdf(url, temp.name)
+		text = extract_text(temp.name)
 		text = f"{extra_context}{text}"
 	
 	cache.set(cache_key, text)
