@@ -97,7 +97,10 @@ def download_pdf_and_extract_text(url: str, extra_context: str = '') -> str:
 
 def pdf_from_html(html:str, output_path: Union[str, bool] = False):
 	config = pdfkit.configuration(wkhtmltopdf=os.getenv('WKHTMLTOPDF_PATH'))
-	options = {"enable-local-file-access": "", "load-error-handling": "ignore", "load-media-error-handling": "ignore"}
+	options = {"load-error-handling": "ignore", "load-media-error-handling": "ignore"}
+	# remove all image tags
+	# see: https://github.com/wkhtmltopdf/wkhtmltopdf/issues/4408
+	html = re.sub(r'<img[^>]*>', '', html)
 	return pdfkit.from_string(html, output_path, options=options, configuration=config)
 
 def download_pdf(url, output_path):
