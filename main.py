@@ -38,10 +38,19 @@ def text(req:TextRequest):
 
 @app.post("/render")
 def render(req:RenderRequest):
+	html = req.html.encode('utf-8')
+	digest = hashlib.sha256(html).hexdigest()
+	cache.set(f"html:{digest}", html)
+	return { "digest" : digest }
+
+@app.get("/pdf/{digest}")
+def pdf(digest:str):
+	html = cache.get(f"html:{digest}")
+	if (html is None):
+		return Response(status_code=404)
+	headers = {'Content-Disposition': f'inline; filename="{digest}.pdf"', 'Content-Type': 'application/pdf'}
 	config = pdfkit.configuration(wkhtmltopdf=os.getenv('WKHTMLTOPDF_PATH'))
-	pdf = pdfkit.from_string(req.html, False, configuration=config)
-	filename = hashlib.sha256(req.html.encode('utf-8')).hexdigest()
-	headers = {'Content-Disposition': f'inline; filename="{filename}.pdf"', 'Content-Type': 'application/pdf'}
+	pdf = pdfkit.from_string(html, False, configuration=config)
 	resp = Response(content=pdf, headers=headers)
 	return resp
 
@@ -68,7 +77,7 @@ def download_pdf_and_extract_text(url: str, extra_context: str = '') -> str:
 		return extra_context
 
 	# hash the inputs into a cache key
-	cache_key = f"pdf:{hash((url, extra_context))}:text"
+	cache_key = f"text:{hash((url, extra_context))}"
 	text = cache.get(cache_key)
 	if (text is not None):
 		logging.info(f"Using cache for {url}...")
