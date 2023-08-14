@@ -2,5 +2,6 @@ fastapi
 pydantic
 uvicorn[standard]
 pdfminer.six
+pdfkit
 tiktoken
 redis[hiredis]

@@ -1,19 +1,24 @@
 import tempfile
 import logging
 import re
+import pdfkit
 import pydantic
 import tiktoken
 import redis
+import hashlib
 import os
-from fastapi import FastAPI
+from fastapi import FastAPI, Response
 from urllib.request import urlretrieve
 from pdfminer.high_level import extract_text
 
-class Request(pydantic.BaseModel):
+class RenderRequest(pydantic.BaseModel):
+	html: str
+
+class TextRequest(pydantic.BaseModel):
 	url: str
 	extra_context: str = ''
 
-class TruncateRequest(Request):
+class TruncateRequest(TextRequest):
 	max_tokens: int = 2048
 	model: str = "gpt-4"
 
@@ -27,9 +32,18 @@ def index():
 	return {"status": "ok"}
 
 @app.post("/text")
-def text(req:Request):
+def text(req:TextRequest):
 	text = download_pdf_and_extract_text(req.url, extra_context=req.extra_context)
 	return { "text": text }
+
+@app.post("/render")
+def render(req:RenderRequest):
+	config = pdfkit.configuration(wkhtmltopdf=os.getenv('WKHTMLTOPDF_PATH'))
+	pdf = pdfkit.from_string(req.html, False, configuration=config)
+	filename = hashlib.sha256(req.html.encode('utf-8')).hexdigest()
+	headers = {'Content-Disposition': f'inline; filename="{filename}.pdf"', 'Content-Type': 'application/pdf'}
+	resp = Response(content=pdf, headers=headers)
+	return resp
 
 @app.post("/truncate")
 def truncate(req:TruncateRequest):
