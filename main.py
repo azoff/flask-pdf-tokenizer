@@ -14,8 +14,8 @@ class Request(pydantic.BaseModel):
 	extra_context: str = ''
 
 class TruncateRequest(Request):
-	max_tokens: int = 256
-	model: str = "gpt-3.5-turbo"
+	max_tokens: int = 2048
+	model: str = "gpt-4"
 
 logging.basicConfig(level=logging.INFO)
 
@@ -41,13 +41,17 @@ def truncate(req:TruncateRequest):
 	)
 	return { "text": text }
 
-def download_pdf_and_truncate_text(url: str, extra_context: str = '', max_tokens:int = 256, model:str = "gpt-3.5-turbo") -> str:
+def download_pdf_and_truncate_text(url: str, extra_context: str = '', max_tokens:int = 2048, model:str = "gpt-4") -> str:
 	text = download_pdf_and_extract_text(url, extra_context=extra_context)
 	return truncate_text(text, max_tokens=max_tokens, model=model)
 
 def download_pdf_and_extract_text(url: str, extra_context: str = '') -> str:
 	
 	global cache
+
+	if not url:
+		logging.warning("No URL provided, returning only the input text.")
+		return extra_context
 
 	# hash the inputs into a cache key
 	cache_key = f"pdf:{hash((url, extra_context))}:text"
@@ -70,7 +74,7 @@ def download_pdf(url, output_path):
 	logging.info(f"PDF downloaded.")
 	return pdf
 
-def truncate_text(text:str, max_tokens:int = 256, model:str = "gpt-3.5-turbo") -> str:
+def truncate_text(text:str, max_tokens:int = 2048, model:str = "gpt-4") -> str:
 	text = text.replace('\n', ' ')
 	text = re.sub('[\s\W]([\S\w][\s\W])+', ' ', text)
 	text = re.sub('\s+', ' ', text)
