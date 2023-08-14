@@ -12,6 +12,7 @@ RUN pip3 install --upgrade pip \
 	&& pip3 install -vr requirements.txt
 
 ENV WKHTMLTOPDF_PATH=/usr/bin/wkhtmltopdf
+ENV XDG_RUNTIME_DIR=/tmp/runtime-root
 
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
 

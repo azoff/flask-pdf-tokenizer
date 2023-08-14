@@ -10,6 +10,7 @@ import os
 from fastapi import FastAPI, Response
 from urllib.request import urlretrieve
 from pdfminer.high_level import extract_text
+from typing import Union
 
 class RenderRequest(pydantic.BaseModel):
 	html: str
@@ -49,8 +50,7 @@ def pdf(digest:str):
 	if (html is None):
 		return Response(status_code=404)
 	headers = {'Content-Disposition': f'inline; filename="{digest}.pdf"', 'Content-Type': 'application/pdf'}
-	config = pdfkit.configuration(wkhtmltopdf=os.getenv('WKHTMLTOPDF_PATH'))
-	pdf = pdfkit.from_string(html, False, configuration=config)
+	pdf = pdf_from_html(html)
 	resp = Response(content=pdf, headers=headers)
 	return resp
 
@@ -86,8 +86,7 @@ def download_pdf_and_extract_text(url: str, extra_context: str = '') -> str:
 			logging.info('detected internal pdf url, using pdfkit...')
 			digest = url.split('/pdf/')[1]
 			html = cache.get(f"html:{digest}")
-			config = pdfkit.configuration(wkhtmltopdf=os.getenv('WKHTMLTOPDF_PATH'))
-			pdfkit.from_string(html, temp.name, configuration=config)
+			pdf_from_html(html, temp.name)
 		else:
 			download_pdf(url, temp.name)
 		text = extract_text(temp.name)
@@ -95,6 +94,11 @@ def download_pdf_and_extract_text(url: str, extra_context: str = '') -> str:
 	
 	cache.set(cache_key, text)
 	return text
+
+def pdf_from_html(html:str, output_path: Union[str, bool] = False):
+	config = pdfkit.configuration(wkhtmltopdf=os.getenv('WKHTMLTOPDF_PATH'))
+	options = {"enable-local-file-access": "", "disable-external-links": ""}
+	return pdfkit.from_string(html, output_path, options=options, configuration=config)
 
 def download_pdf(url, output_path):
 	logging.info(f"Downloading PDF from {url}...")
