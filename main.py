@@ -97,8 +97,13 @@ def download_pdf_and_extract_text(url: str, extra_context: str = '') -> str:
 
 def pdf_from_html(html:str, output_path: Union[str, bool] = False):
 	config = pdfkit.configuration(wkhtmltopdf=os.getenv('WKHTMLTOPDF_PATH'))
-	options = {"enable-local-file-access": "", "disable-external-links": ""}
-	return pdfkit.from_string(html, output_path, options=options, configuration=config)
+	options = {"enable-local-file-access": ""}
+	try:
+		return pdfkit.from_string(html, output_path, options=options, configuration=config)
+	except Exception as e:
+		logging.error(f"Error generating PDF: {e}")
+		logging.info(f"HTML: {html}")
+		raise e
 
 def download_pdf(url, output_path):
 	logging.info(f"Downloading PDF from {url}...")
