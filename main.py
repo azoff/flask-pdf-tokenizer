@@ -70,8 +70,6 @@ def download_pdf_and_truncate_text(url: str, extra_context: str = '', max_tokens
 
 def download_pdf_and_extract_text(url: str, extra_context: str = '') -> str:
 	
-	global cache
-
 	if not url:
 		logging.warning("No URL provided, returning only the input text.")
 		return extra_context
@@ -84,7 +82,14 @@ def download_pdf_and_extract_text(url: str, extra_context: str = '') -> str:
 		return text
 	
 	with tempfile.NamedTemporaryFile() as temp:
-		download_pdf(url, temp.name)
+		if '/pdf/' in url:
+			logging.info('detected internal pdf url, using pdfkit...')
+			digest = url.split('/pdf/')[1]
+			html = cache.get(f"html:{digest}")
+			config = pdfkit.configuration(wkhtmltopdf=os.getenv('WKHTMLTOPDF_PATH'))
+			pdfkit.from_string(html, temp.name, configuration=config)
+		else:
+			download_pdf(url, temp.name)
 		text = extract_text(temp.name)
 		text = f"{text}{extra_context}"
 	
