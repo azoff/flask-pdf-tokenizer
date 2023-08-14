@@ -15,7 +15,7 @@ class RenderRequest(pydantic.BaseModel):
 	html: str
 
 class TextRequest(pydantic.BaseModel):
-	url: str
+	url: str = ''
 	extra_context: str = ''
 
 class TruncateRequest(TextRequest):
