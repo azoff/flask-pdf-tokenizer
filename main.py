@@ -115,7 +115,7 @@ def docsend2pdf_translate(url, csrfmiddlewaretoken, csrftoken, email, passcode='
         }
         # Make a POST request to submit the form data
         logging.info(f"Converting {url} on behalf of {email}...")
-        response = session.post('https://docsend2pdf.com', headers=headers, data=data, allow_redirects=True)
+        response = session.post('https://docsend2pdf.com', headers=headers, data=data, allow_redirects=True, timeout=60)
         if response.ok:
             logging.info(f"Conversion successful, received {response.headers['Content-Length']} bytes.")
             return response
