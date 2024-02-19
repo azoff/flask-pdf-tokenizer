@@ -23,6 +23,10 @@ class DocsendRequest(pydantic.BaseModel):
 class RenderRequest(pydantic.BaseModel):
   html: str
 
+class ProxyRequest(pydantic.BaseModel):
+  url: str
+  method: str = 'GET'
+
 class TextRequest(pydantic.BaseModel):
   url: str = ''
   extra_context: str = ''
@@ -49,8 +53,10 @@ def text(req:TextRequest):
 def render(req:RenderRequest):
   html = req.html.encode('utf-8')
   digest = hashlib.sha256(html).hexdigest()
-  cache.set(f"html:{digest}", html)
-  return { "digest" : digest }
+  headers = {'Content-Disposition': f'inline; filename="{digest}.pdf"', 'Content-Type': 'application/pdf'}
+  pdf = pdf_from_html(html)
+  resp = Response(content=pdf, headers=headers)
+  return resp
 
 @app.post("/docsend2pdf")
 def docsend2pdf(req:DocsendRequest):
@@ -63,15 +69,10 @@ def docsend2pdf(req:DocsendRequest):
   response = Response(content=doc2pdf_response.content, headers=doc2pdf_response.headers)
   return response
 
-@app.get("/pdf/{digest}")
-def pdf(digest:str):
-  html = cache.get(f"html:{digest}")
-  if (html is None):
-    return Response(status_code=404)
-  headers = {'Content-Disposition': f'inline; filename="{digest}.pdf"', 'Content-Type': 'application/pdf'}
-  pdf = pdf_from_html(html)
-  resp = Response(content=pdf, headers=headers)
-  return resp
+@app.post("/proxy")
+def proxy(req:ProxyRequest):
+  response = requests.request(req.method, req.url)
+  return Response(content=response.content, headers=response.headers)
 
 @app.post("/truncate")
 def truncate(req:TruncateRequest):
@@ -150,13 +151,7 @@ def download_pdf_and_extract_text(url: str, extra_context: str = '') -> str:
     return text
   
   with tempfile.NamedTemporaryFile() as temp:
-    if '/pdf/' in url:
-      logging.info('detected internal pdf url, using pdfkit...')
-      digest = url.split('/pdf/')[1]
-      html = cache.get(f"html:{digest}")
-      pdf_from_html(html, temp.name)
-    else:
-      download_pdf(url, temp.name)
+    download_pdf(url, temp.name)
     text = extract_text(temp.name)
     text = f"{text}{extra_context}"
   
