@@ -60,13 +60,13 @@ def render(req:RenderRequest):
 
 @app.post("/docsend2pdf")
 def docsend2pdf(req:DocsendRequest):
-  headers, content = generate_pdf_from_docsend_url(
+  kwargs = generate_pdf_from_docsend_url(
     req.url, 
     req.email, 
     passcode=req.passcode, 
     searchable=req.searchable
   )
-  response = Response(content=content, headers=headers)
+  response = Response(**kwargs)
   return response
 
 @app.post("/proxy")
@@ -122,9 +122,13 @@ def docsend2pdf_translate(url, csrfmiddlewaretoken, csrftoken, email, passcode='
         response = session.post('https://docsend2pdf.com', headers=headers, data=data, allow_redirects=True, timeout=60)
         if response.ok:
             logging.info(f"Conversion successful, received {response.headers['Content-Length']} bytes.")
-            data = (response.headers, response.content)
-            cache.set(cache_key, data)
-            return data
+            # serialize request into kwargs
+            kwargs = dict(
+              content=response.content,
+              headers=dict(response.headers)
+            )
+            cache.set(cache_key, kwargs)
+            return kwargs
         else:
             response.raise_for_status()
 
