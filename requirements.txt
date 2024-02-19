@@ -1,7 +1,9 @@
+BeautifulSoup4
 fastapi
-pydantic
-uvicorn[standard]
-pdfminer.six
 pdfkit
-tiktoken
+pdfminer.six
+pydantic
 redis[hiredis]
+requests
+tiktoken
+uvicorn[standard]
