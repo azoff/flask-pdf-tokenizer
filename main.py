@@ -60,13 +60,13 @@ def render(req:RenderRequest):
 
 @app.post("/docsend2pdf")
 def docsend2pdf(req:DocsendRequest):
-  doc2pdf_response = generate_pdf_from_docsend_url(
+  headers, content = generate_pdf_from_docsend_url(
     req.url, 
     req.email, 
     passcode=req.passcode, 
     searchable=req.searchable
   )
-  response = Response(content=doc2pdf_response.content, headers=doc2pdf_response.headers)
+  response = Response(content=content, headers=headers)
   return response
 
 @app.post("/proxy")
@@ -99,6 +99,10 @@ def docsend2pdf_credentials():
             response.raise_for_status()
 
 def docsend2pdf_translate(url, csrfmiddlewaretoken, csrftoken, email, passcode='', searchable='on'):
+    cache_key = f"docsend2pdf:{hash((url, email, passcode, searchable))}"
+    if cache.exists(cache_key):
+        logging.info(f"Using cache for {url}...")
+        return cache.get(cache_key)
     with requests.Session() as session:
         # Include csrftoken in session cookies
         session.cookies.set('csrftoken', csrftoken)
@@ -118,7 +122,9 @@ def docsend2pdf_translate(url, csrfmiddlewaretoken, csrftoken, email, passcode='
         response = session.post('https://docsend2pdf.com', headers=headers, data=data, allow_redirects=True, timeout=60)
         if response.ok:
             logging.info(f"Conversion successful, received {response.headers['Content-Length']} bytes.")
-            return response
+            data = (response.headers, response.content)
+            cache.set(cache_key, data)
+            return data
         else:
             response.raise_for_status()
 
