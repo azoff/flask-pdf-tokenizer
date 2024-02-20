@@ -1,5 +1,5 @@
 from bs4 import BeautifulSoup
-from fastapi import FastAPI, Response
+from fastapi import FastAPI, Response, BackgroundTasks
 from pdfminer.high_level import extract_text
 from typing import Union
 from urllib.request import urlretrieve
@@ -34,6 +34,7 @@ class DocsendRequest(ReferencableRequest):
   email: str
   passcode: str = ''
   searchable: bool = True
+  asynchronous: bool = False
 
 class RenderRequest(ReferencableRequest):
   html: str
@@ -84,14 +85,13 @@ def render(req:RenderRequest):
   return make_referenced_response(req.reference, kwargs)
 
 @app.post("/docsend2pdf")
-def docsend2pdf(req:DocsendRequest):
-  kwargs = generate_pdf_from_docsend_url(
-    req.url, 
-    req.email, 
-    passcode=req.passcode, 
-    searchable=req.searchable
-  )
-  return make_referenced_response(req.reference, kwargs)
+def docsend2pdf(req:DocsendRequest, background_tasks: BackgroundTasks):
+  if req.asynchronous:
+    background_tasks.add_task(docsend2pdf_sync, req)
+    return dict(key=make_reference_key(req.reference))
+  else:
+    return docsend2pdf_sync(req)
+
 
 @app.post("/proxy")
 def proxy(req:ProxyRequest):
@@ -120,6 +120,14 @@ def ocr(req:OCRRequest):
 def reference(key:str):
   return Response(**get_reference_from_cache(key))
 
+def docsend2pdf_sync(req:DocsendRequest):
+   kwargs = generate_pdf_from_docsend_url(
+    req.url, 
+    req.email, 
+    passcode=req.passcode, 
+    searchable=req.searchable)
+   return make_referenced_response(req.reference, kwargs)
+
 def get_reference_from_cache(key, default=None):
   if not cache.exists(key):
     return default
@@ -128,9 +136,12 @@ def get_reference_from_cache(key, default=None):
 def make_referenced_response(seed, kwargs):
   if not seed:
      return Response(**kwargs)
-  key = hashlib.sha256(seed.encode('utf-8')).hexdigest()
+  key = make_reference_key(seed)
   cache.set(key, base64.b64encode(pickle.dumps(kwargs)))
   return dict(key=key)
+
+def make_reference_key(seed):
+  return hashlib.sha256(seed.encode('utf-8')).hexdigest()
 
 def docsend2pdf_credentials():
     # Make a GET request to fetch the initial page and extract CSRF tokens
