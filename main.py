@@ -21,7 +21,10 @@ import tempfile
 import tiktoken
 import time
 
-multiprocessing.set_start_method('spawn')
+try:
+  multiprocessing.set_start_method('spawn')
+except RuntimeError:
+    pass
 
 class ReferencableRequest(pydantic.BaseModel):
    reference: str = ''
