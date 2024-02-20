@@ -46,7 +46,6 @@ class OCRRequest(pydantic.BaseModel):
   url: str
   extra_context: str = ''
 
-
 logging.basicConfig(level=logging.INFO)
 
 app = FastAPI()
@@ -101,7 +100,7 @@ def truncate(req:TruncateRequest):
 def ocr(req:OCRRequest):
   text = ocr_remote_pdf(req.url)
   text = f"{text} {req.extra_context}"
-  return { "text": text }
+  return { "text": text.strip() }
 
 def docsend2pdf_credentials():
     # Make a GET request to fetch the initial page and extract CSRF tokens
@@ -204,7 +203,7 @@ def download_pdf_and_extract_text(url: str, extra_context: str = '', ocr:bool = 
     text = extract_text(temp.name)
     if ocr:
       text = f"{text} {ocr_pdf_bytes(temp.read())}"
-    text = f"{text} {extra_context}"
+    text = f"{text} {extra_context}".strip()
   
   cache.set(cache_key, text)
   return text
