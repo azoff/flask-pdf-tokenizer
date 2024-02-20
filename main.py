@@ -20,16 +20,19 @@ import tempfile
 import tiktoken
 import time
 
-class DocsendRequest(pydantic.BaseModel):
+class ReferencableRequest(pydantic.BaseModel):
+   reference: str = ''
+
+class DocsendRequest(ReferencableRequest):
   url: str
   email: str
   passcode: str = ''
   searchable: bool = True
 
-class RenderRequest(pydantic.BaseModel):
+class RenderRequest(ReferencableRequest):
   html: str
 
-class ProxyRequest(pydantic.BaseModel):
+class ProxyRequest(ReferencableRequest):
   url: str
   method: str = 'GET'
 
@@ -66,8 +69,8 @@ def render(req:RenderRequest):
   digest = hashlib.sha256(html).hexdigest()
   headers = {'Content-Disposition': f'inline; filename="{digest}.pdf"', 'Content-Type': 'application/pdf'}
   pdf = pdf_from_html(html)
-  resp = Response(content=pdf, headers=headers)
-  return resp
+  kwargs = dict(content=pdf, headers=headers)
+  return make_referenced_response(req.reference, kwargs)
 
 @app.post("/docsend2pdf")
 def docsend2pdf(req:DocsendRequest):
@@ -77,13 +80,13 @@ def docsend2pdf(req:DocsendRequest):
     passcode=req.passcode, 
     searchable=req.searchable
   )
-  response = Response(**kwargs)
-  return response
+  return make_referenced_response(req.reference, kwargs)
 
 @app.post("/proxy")
 def proxy(req:ProxyRequest):
   response = requests.request(req.method, req.url)
-  return Response(content=response.content, headers=response.headers)
+  kwargs = dict(content=response.content, headers=response.headers)
+  return make_referenced_response(req.reference, kwargs)
 
 @app.post("/truncate")
 def truncate(req:TruncateRequest):
@@ -101,6 +104,18 @@ def ocr(req:OCRRequest):
   text = ocr_remote_pdf(req.url)
   text = f"{text} {req.extra_context}"
   return { "text": text.strip() }
+
+@app.get("/reference/{key}")
+def reference(key:str):
+  kwargs = pickle.loads(base64.b64decode(cache.get(key)))
+  return Response(**kwargs)
+
+def make_referenced_response(seed, kwargs):
+  if not seed:
+     return Response(**kwargs)
+  key = hashlib.sha256(seed.encode('utf-8')).hexdigest()
+  cache.set(key, base64.b64encode(pickle.dumps(kwargs)))
+  return dict(key=key)
 
 def docsend2pdf_credentials():
     # Make a GET request to fetch the initial page and extract CSRF tokens
