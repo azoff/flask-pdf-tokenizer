@@ -4,13 +4,14 @@ from pdfminer.high_level import extract_text
 from typing import Union
 from urllib.request import urlretrieve
 import base64
-import gzip
 import hashlib
+import json
 import logging
+import multiprocessing
 import os
 import pdf2image
-import pickle
 import pdfkit
+import pickle
 import pydantic
 import pytesseract
 import re
@@ -53,6 +54,11 @@ logging.basicConfig(level=logging.INFO)
 
 app = FastAPI()
 cache = redis.Redis(host=os.getenv('REDIS_HOST'), port=6379, decode_responses=True)
+
+# print errors as json
+@app.exception_handler(Exception)
+def uncaught_exception_handler(request, exc):
+  return Response(content=json.dumps({ 'error': str(exc) }), media_type='application/json', status_code=500)
 
 @app.get("/")
 def index():
@@ -107,8 +113,12 @@ def ocr(req:OCRRequest):
 
 @app.get("/reference/{key}")
 def reference(key:str):
-  kwargs = pickle.loads(base64.b64decode(cache.get(key)))
-  return Response(**kwargs)
+  return Response(**get_reference_from_cache(key))
+
+def get_reference_from_cache(key, default=None):
+  if not cache.exists(key):
+    return default
+  return pickle.loads(base64.b64decode(cache.get(key)))
 
 def make_referenced_response(seed, kwargs):
   if not seed:
@@ -174,14 +184,24 @@ def docsend2pdf_translate(url, csrfmiddlewaretoken, csrftoken, email, passcode='
             response.raise_for_status()
 
 def rasterize_pdf_to_images(pdf_bytes):
-    return pdf2image.convert_from_bytes(pdf_bytes)
+    logging.info(f"Rasterizing PDF to images...")
+    images = pdf2image.convert_from_bytes(pdf_bytes)
+    logging.info(f"Rasterized PDF to {len(images)} images.")
+    return images
 
-def ocr_image(image):
+def ocr_image(args):
+    image, i, total = args
+    logging.info(f"Running OCR on page {i+1} of {total}...")
     return pytesseract.image_to_string(image)
 
 def ocr_pdf_bytes(pdf_bytes):
     images = rasterize_pdf_to_images(pdf_bytes)
-    return ' '.join([ocr_image(image) for image in images])
+    total = len(images)
+    inputs = [(image, i, total) for i, image in enumerate(images)]
+    text = []
+    with multiprocessing.Pool(4) as pool:
+      text = pool.map(ocr_image, inputs)
+    return ' '.join(text).strip()
 
 def ocr_remote_pdf(url):
     response = requests.get(url)
@@ -215,9 +235,17 @@ def download_pdf_and_extract_text(url: str, extra_context: str = '', ocr:bool = 
     return text
   
   with tempfile.NamedTemporaryFile() as temp:
-    download_pdf(url, temp.name)
+    if url.startswith('ref:'):
+      kwargs = get_reference_from_cache(url[4:], default={})
+      bytes = kwargs.get('content', b'')
+      if not bytes:
+        raise ValueError(f"Missing or empty reference to {url[4:]} in cache.")
+      temp.write(bytes)
+    else:
+      download_pdf(url, temp.name)
     text = extract_text(temp.name)
     if ocr:
+      temp.seek(0)
       text = f"{text} {ocr_pdf_bytes(temp.read())}"
     text = f"{text} {extra_context}".strip()
   
