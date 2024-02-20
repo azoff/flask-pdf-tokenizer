@@ -3,16 +3,22 @@ from fastapi import FastAPI, Response
 from pdfminer.high_level import extract_text
 from typing import Union
 from urllib.request import urlretrieve
+import base64
+import gzip
 import hashlib
 import logging
 import os
+import pdf2image
+import pickle
 import pdfkit
 import pydantic
+import pytesseract
 import re
 import redis
 import requests
 import tempfile
 import tiktoken
+import time
 
 class DocsendRequest(pydantic.BaseModel):
   url: str
@@ -30,10 +36,16 @@ class ProxyRequest(pydantic.BaseModel):
 class TextRequest(pydantic.BaseModel):
   url: str = ''
   extra_context: str = ''
+  ocr: bool = False
 
 class TruncateRequest(TextRequest):
   max_tokens: int = 2048
   model: str = "gpt-4"
+
+class OCRRequest(pydantic.BaseModel):
+  url: str
+  extra_context: str = ''
+
 
 logging.basicConfig(level=logging.INFO)
 
@@ -46,7 +58,7 @@ def index():
 
 @app.post("/text")
 def text(req:TextRequest):
-  text = download_pdf_and_extract_text(req.url, extra_context=req.extra_context)
+  text = download_pdf_and_extract_text(req.url, extra_context=req.extra_context, ocr=req.ocr)
   return { "text": text }
 
 @app.post("/render")
@@ -78,17 +90,26 @@ def proxy(req:ProxyRequest):
 def truncate(req:TruncateRequest):
   text = download_pdf_and_truncate_text(
     req.url, 
-    extra_context=req.extra_context, 
+    extra_context=req.extra_context,
+    ocr=req.ocr,
     max_tokens=req.max_tokens,
     model=req.model
   )
   return { "text": text }
 
+@app.post("/ocr")
+def ocr(req:OCRRequest):
+  text = ocr_remote_pdf(req.url)
+  text = f"{text} {req.extra_context}"
+  return { "text": text }
+
 def docsend2pdf_credentials():
     # Make a GET request to fetch the initial page and extract CSRF tokens
     with requests.Session() as session:
+        start_time = time.time()
         logging.info(f"Fetching docsend2pdf CSRF tokens...")
         response = session.get('https://docsend2pdf.com')
+        logging.info(f"Received docsend2pdf CSRF tokens in {time.time() - start_time} seconds.")
         if response.ok:
             cookies = session.cookies.get_dict()
             csrftoken = cookies.get('csrftoken', '')
@@ -99,10 +120,11 @@ def docsend2pdf_credentials():
             response.raise_for_status()
 
 def docsend2pdf_translate(url, csrfmiddlewaretoken, csrftoken, email, passcode='', searchable='on'):
-    cache_key = f"docsend2pdf:{hash((url, email, passcode, searchable))}"
+    inputhash = hash((url, email, passcode, searchable))
+    cache_key = f"docsend2pdf:{inputhash}"
     if cache.exists(cache_key):
         logging.info(f"Using cache for {url}...")
-        return cache.get(cache_key)
+        return pickle.loads(base64.b64decode(cache.get(cache_key)))
     with requests.Session() as session:
         # Include csrftoken in session cookies
         session.cookies.set('csrftoken', csrftoken)
@@ -118,19 +140,37 @@ def docsend2pdf_translate(url, csrfmiddlewaretoken, csrftoken, email, passcode='
             'searchable': searchable
         }
         # Make a POST request to submit the form data
+        start_time = time.time()
         logging.info(f"Converting {url} on behalf of {email}...")
         response = session.post('https://docsend2pdf.com', headers=headers, data=data, allow_redirects=True, timeout=60)
         if response.ok:
-            logging.info(f"Conversion successful, received {response.headers['Content-Length']} bytes.")
-            # serialize request into kwargs
+            logging.info(f"Conversion successful, received {response.headers['Content-Length']} bytes in {time.time() - start_time} seconds.")
+            # gzip content
             kwargs = dict(
               content=response.content,
-              headers=dict(response.headers)
+              headers={
+                'Content-Type': response.headers['Content-Type'],
+                'Content-Disposition': response.headers.get('Content-Disposition', f'inline; filename="{inputhash}.pdf"')
+              }
             )
-            cache.set(cache_key, kwargs)
+            cache.set(cache_key, base64.b64encode(pickle.dumps(kwargs)))
             return kwargs
         else:
             response.raise_for_status()
+
+def rasterize_pdf_to_images(pdf_bytes):
+    return pdf2image.convert_from_bytes(pdf_bytes)
+
+def ocr_image(image):
+    return pytesseract.image_to_string(image)
+
+def ocr_pdf_bytes(pdf_bytes):
+    images = rasterize_pdf_to_images(pdf_bytes)
+    return ' '.join([ocr_image(image) for image in images])
+
+def ocr_remote_pdf(url):
+    response = requests.get(url)
+    return ocr_pdf_bytes(response.content)
 
 def generate_pdf_from_docsend_url(url, email, passcode='', searchable=True):
     credentials = docsend2pdf_credentials()
@@ -142,19 +182,18 @@ def generate_pdf_from_docsend_url(url, email, passcode='', searchable=True):
     )
     return docsend2pdf_translate(url, **kwargs)
 
-
-def download_pdf_and_truncate_text(url: str, extra_context: str = '', max_tokens:int = 2048, model:str = "gpt-4") -> str:
-  text = download_pdf_and_extract_text(url, extra_context=extra_context)
+def download_pdf_and_truncate_text(url: str, extra_context: str = '', ocr:bool = False, max_tokens:int = 2048, model:str = "gpt-4") -> str:
+  text = download_pdf_and_extract_text(url, extra_context=extra_context, ocr=ocr)
   return truncate_text(text, max_tokens=max_tokens, model=model)
 
-def download_pdf_and_extract_text(url: str, extra_context: str = '') -> str:
+def download_pdf_and_extract_text(url: str, extra_context: str = '', ocr:bool = False) -> str:
   
   if not url:
     logging.warning("No URL provided, returning only the input text.")
     return extra_context
 
   # hash the inputs into a cache key
-  cache_key = f"text:{hash((url, extra_context))}"
+  cache_key = f"text:{hash((url, extra_context, ocr))}"
   text = cache.get(cache_key)
   if (text is not None):
     logging.info(f"Using cache for {url}...")
@@ -163,7 +202,9 @@ def download_pdf_and_extract_text(url: str, extra_context: str = '') -> str:
   with tempfile.NamedTemporaryFile() as temp:
     download_pdf(url, temp.name)
     text = extract_text(temp.name)
-    text = f"{text}{extra_context}"
+    if ocr:
+      text = f"{text} {ocr_pdf_bytes(temp.read())}"
+    text = f"{text} {extra_context}"
   
   cache.set(cache_key, text)
   return text

@@ -1,8 +1,10 @@
 BeautifulSoup4
 fastapi
+pdf2image
 pdfkit
 pdfminer.six
 pydantic
+pytesseract
 redis[hiredis]
 requests
 tiktoken

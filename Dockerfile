@@ -5,6 +5,8 @@ WORKDIR /app
 RUN apt-get update \
 	&& apt-get install -y --no-install-recommends \
 		wkhtmltopdf \
+		poppler-utils \
+		tesseract-ocr \
 	&& rm -rf /var/lib/apt/lists/*
 
 ADD requirements.txt .
