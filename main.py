@@ -118,7 +118,7 @@ def docsend2pdf_credentials():
         else:
             response.raise_for_status()
 
-def docsend2pdf_translate(url, csrfmiddlewaretoken, csrftoken, email, passcode='', searchable='on'):
+def docsend2pdf_translate(url, csrfmiddlewaretoken, csrftoken, email, passcode='', searchable=False):
     inputhash = hash((url, email, passcode, searchable))
     cache_key = f"docsend2pdf:{inputhash}"
     if cache.exists(cache_key):
@@ -136,8 +136,9 @@ def docsend2pdf_translate(url, csrfmiddlewaretoken, csrftoken, email, passcode='
             'url': url,
             'email': email,
             'passcode': passcode,
-            'searchable': searchable
         }
+        if searchable:
+            data['searchable'] = 'on'
         # Make a POST request to submit the form data
         start_time = time.time()
         logging.info(f"Converting {url} on behalf of {email}...")
@@ -176,7 +177,7 @@ def generate_pdf_from_docsend_url(url, email, passcode='', searchable=True):
     kwargs = dict(
       email=email,
       passcode=passcode,
-      searchable='on' if searchable else 'off',
+      searchable=searchable,
       **credentials
     )
     return docsend2pdf_translate(url, **kwargs)
