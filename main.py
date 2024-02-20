@@ -21,6 +21,8 @@ import tempfile
 import tiktoken
 import time
 
+multiprocessing.set_start_method('spawn')
+
 class ReferencableRequest(pydantic.BaseModel):
    reference: str = ''
 
@@ -199,7 +201,6 @@ def ocr_pdf_bytes(pdf_bytes):
     total = len(images)
     inputs = [(image, i, total) for i, image in enumerate(images)]
     text = []
-    multiprocessing.set_start_method('spawn')
     with multiprocessing.Pool(4) as pool:
       text = pool.map(ocr_image, inputs)
     return ' '.join(text).strip()
