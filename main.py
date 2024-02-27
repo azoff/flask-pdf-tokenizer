@@ -88,11 +88,7 @@ def render(req:RenderRequest):
 
 @app.post("/docsend2pdf")
 def docsend2pdf(req:DocsendRequest, background_tasks: BackgroundTasks):
-  if req.asynchronous:
-    background_tasks.add_task(docsend2pdf_sync, req)
-    return dict(key=make_reference_key(req.reference))
-  else:
-    return docsend2pdf_sync(req)
+  return background_request(req, background_tasks, docsend2pdf_sync)
 
 
 @app.post("/proxy")
@@ -113,15 +109,22 @@ def truncate(req:TruncateRequest):
 
 @app.post("/ocr")
 def ocr(req:OCRRequest, background_tasks: BackgroundTasks):
-  if req.asynchronous:
-    background_tasks.add_task(ocr_sync, req)
-    return dict(key=make_reference_key(req.reference))
-  else:
-    return ocr_sync(req)
+  return background_request(req, background_tasks, ocr_sync)
 
 @app.get("/reference/{key}")
 def reference(key:str):
   return Response(**get_reference_from_cache(key))
+
+def background_request(req:BackgroundableRequest, background_tasks: BackgroundTasks, sync_handler: callable):
+  resp = None
+  if req.asynchronous:
+    background_tasks.add_task(sync_handler, req)
+    resp = dict(key=make_reference_key(req.reference))
+  else:
+    resp = sync_handler(req)
+  if isinstance(resp, dict) and 'key' in resp:
+    logging.info(f"Returning reference key {resp['key']}...")
+  return resp
 
 def docsend2pdf_sync(req:DocsendRequest):
    kwargs = generate_pdf_from_docsend_url(
@@ -140,7 +143,7 @@ def make_referenced_response(seed, kwargs):
   if not seed:
      return Response(**kwargs)
   key = make_reference_key(seed)
-  logging.info(f"Caching response under {key} for {seed}...")
+  logging.info(f"Caching {len(kwargs['content'])} byte response under {key} for {seed}...")
   cache.set(key, base64.b64encode(pickle.dumps(kwargs)))
   return dict(key=key)
 
