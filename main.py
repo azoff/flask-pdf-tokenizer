@@ -79,10 +79,10 @@ def text(req:TextRequest):
 
 @app.post("/render")
 def render(req:RenderRequest):
-  html = req.html.encode('utf-8')
-  digest = hashlib.sha256(html).hexdigest()
+  encoded = req.html.encode('utf-8')
+  digest = hashlib.sha256(encoded).hexdigest()
   headers = {'Content-Disposition': f'inline; filename="{digest}.pdf"', 'Content-Type': 'application/pdf'}
-  pdf = pdf_from_html(html)
+  pdf = pdf_from_html(req.html)
   kwargs = dict(content=pdf, headers=headers)
   return make_referenced_response(req.reference, kwargs)
 
