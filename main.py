@@ -140,6 +140,7 @@ def make_referenced_response(seed, kwargs):
   if not seed:
      return Response(**kwargs)
   key = make_reference_key(seed)
+  logging.info(f"Caching response under {key}...")
   cache.set(key, base64.b64encode(pickle.dumps(kwargs)))
   return dict(key=key)
 
@@ -241,6 +242,7 @@ def ocr_searchable_pdf(url, pool_size:int = 4):
     pdf_writer.write(f)
     f.seek(0)
     kwargs = dict(content=f.read(), headers={'Content-Type': 'application/pdf'})
+    logging.info(f"OCR complete, caching {len(kwargs['content'])} bytes under {cache_key}.")
     cache.set(cache_key, base64.b64encode(pickle.dumps(kwargs)))
     return kwargs
 
