@@ -140,7 +140,7 @@ def make_referenced_response(seed, kwargs):
   if not seed:
      return Response(**kwargs)
   key = make_reference_key(seed)
-  logging.info(f"Caching response under {key}...")
+  logging.info(f"Caching response under {key} for {seed}...")
   cache.set(key, base64.b64encode(pickle.dumps(kwargs)))
   return dict(key=key)
 
