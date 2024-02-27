@@ -4,6 +4,7 @@ pdf2image
 pdfkit
 pdfminer.six
 pydantic
+PyPDF2
 pytesseract
 redis[hiredis]
 requests

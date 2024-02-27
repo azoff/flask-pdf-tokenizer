@@ -5,6 +5,7 @@ from typing import Union
 from urllib.request import urlretrieve
 import base64
 import hashlib
+import io
 import json
 import logging
 import multiprocessing
@@ -13,6 +14,7 @@ import pdf2image
 import pdfkit
 import pickle
 import pydantic
+import PyPDF2
 import pytesseract
 import re
 import redis
@@ -27,14 +29,16 @@ except RuntimeError:
     pass
 
 class ReferencableRequest(pydantic.BaseModel):
-   reference: str = ''
+  reference: str = ''
 
-class DocsendRequest(ReferencableRequest):
+class BackgroundableRequest(ReferencableRequest):
+  asynchronous: bool = False
+
+class DocsendRequest(BackgroundableRequest):
   url: str
   email: str
   passcode: str = ''
   searchable: bool = True
-  asynchronous: bool = False
 
 class RenderRequest(ReferencableRequest):
   html: str
@@ -46,15 +50,13 @@ class ProxyRequest(ReferencableRequest):
 class TextRequest(pydantic.BaseModel):
   url: str = ''
   extra_context: str = ''
-  ocr: bool = False
 
 class TruncateRequest(TextRequest):
   max_tokens: int = 2048
   model: str = "gpt-4"
 
-class OCRRequest(pydantic.BaseModel):
+class OCRRequest(BackgroundableRequest):
   url: str
-  extra_context: str = ''
 
 logging.basicConfig(level=logging.INFO)
 
@@ -72,7 +74,7 @@ def index():
 
 @app.post("/text")
 def text(req:TextRequest):
-  text = download_pdf_and_extract_text(req.url, extra_context=req.extra_context, ocr=req.ocr)
+  text = download_pdf_and_extract_text(req.url, extra_context=req.extra_context)
   return { "text": text }
 
 @app.post("/render")
@@ -104,17 +106,18 @@ def truncate(req:TruncateRequest):
   text = download_pdf_and_truncate_text(
     req.url, 
     extra_context=req.extra_context,
-    ocr=req.ocr,
     max_tokens=req.max_tokens,
     model=req.model
   )
   return { "text": text }
 
 @app.post("/ocr")
-def ocr(req:OCRRequest):
-  text = ocr_remote_pdf(req.url)
-  text = f"{text} {req.extra_context}"
-  return { "text": text.strip() }
+def ocr(req:OCRRequest, background_tasks: BackgroundTasks):
+  if req.asynchronous:
+    background_tasks.add_task(ocr_sync, req)
+    return dict(key=make_reference_key(req.reference))
+  else:
+    return ocr_sync(req)
 
 @app.get("/reference/{key}")
 def reference(key:str):
@@ -199,29 +202,51 @@ def docsend2pdf_translate(url, csrfmiddlewaretoken, csrftoken, email, passcode='
         else:
             response.raise_for_status()
 
-def rasterize_pdf_to_images(pdf_bytes):
-    logging.info(f"Rasterizing PDF to images...")
-    images = pdf2image.convert_from_bytes(pdf_bytes)
+def rasterize_pdf_to_images(pdf_path:str):
+    logging.info(f"Rasterizing PDF {pdf_path} to images...")
+    images = pdf2image.convert_from_path(pdf_path)
     logging.info(f"Rasterized PDF to {len(images)} images.")
     return images
 
-def ocr_image(args):
+def ocr_image_to_pdf_page(args):
     image, i, total = args
     logging.info(f"Running OCR on page {i+1} of {total}...")
-    return pytesseract.image_to_string(image)
+    page = pytesseract.image_to_pdf_or_hocr(image, extension='pdf')
+    pdf = PyPDF2.PdfReader(io.BytesIO(page))
+    return pdf.pages[0]
+    
+def ocr_searchable_pdf(url, pool_size:int = 4):
+  cache_key = f"ocr_searchable_pdf:{url}"
+  if cache.exists(cache_key):
+    logging.info(f"Using cache for {url}...")
+    return pickle.loads(base64.b64decode(cache.get(cache_key)))
+  
+  images = []
+  with tempfile.NamedTemporaryFile() as temp:
+    get_or_download_pdf(url, temp)
+    images = rasterize_pdf_to_images(temp.name)
 
-def ocr_pdf_bytes(pdf_bytes):
-    images = rasterize_pdf_to_images(pdf_bytes)
-    total = len(images)
-    inputs = [(image, i, total) for i, image in enumerate(images)]
-    text = []
-    with multiprocessing.Pool(4) as pool:
-      text = pool.map(ocr_image, inputs)
-    return ' '.join(text).strip()
+  total = len(images)
+  inputs = [(image, i, total) for i, image in enumerate(images)]
+  pages = []
+  with multiprocessing.Pool(pool_size) as pool:
+    pages = pool.map(ocr_image_to_pdf_page, inputs)
+  
+  pdf_writer = PyPDF2.PdfWriter()
+  for page in pages:
+    pdf_writer.add_page(page)
+  
+  # get the pdf bytes
+  with io.BytesIO() as f:
+    pdf_writer.write(f)
+    f.seek(0)
+    kwargs = dict(content=f.read(), headers={'Content-Type': 'application/pdf'})
+    cache.set(cache_key, base64.b64encode(pickle.dumps(kwargs)))
+    return kwargs
 
-def ocr_remote_pdf(url):
-    response = requests.get(url)
-    return ocr_pdf_bytes(response.content)
+def ocr_sync(req:OCRRequest):
+  kwargs = ocr_searchable_pdf(req.url)
+  return make_referenced_response(req.reference, kwargs) 
 
 def generate_pdf_from_docsend_url(url, email, passcode='', searchable=True):
     credentials = docsend2pdf_credentials()
@@ -233,36 +258,36 @@ def generate_pdf_from_docsend_url(url, email, passcode='', searchable=True):
     )
     return docsend2pdf_translate(url, **kwargs)
 
-def download_pdf_and_truncate_text(url: str, extra_context: str = '', ocr:bool = False, max_tokens:int = 2048, model:str = "gpt-4") -> str:
-  text = download_pdf_and_extract_text(url, extra_context=extra_context, ocr=ocr)
+def download_pdf_and_truncate_text(url: str, extra_context: str = '', max_tokens:int = 2048, model:str = "gpt-4") -> str:
+  text = download_pdf_and_extract_text(url, extra_context=extra_context)
   return truncate_text(text, max_tokens=max_tokens, model=model)
 
-def download_pdf_and_extract_text(url: str, extra_context: str = '', ocr:bool = False) -> str:
+def get_or_download_pdf(url: str, temp: tempfile.NamedTemporaryFile):
+  if url.startswith('ref:'):
+    kwargs = get_reference_from_cache(url[4:], default={})
+    bytes = kwargs.get('content', b'')
+    if not bytes:
+      raise ValueError(f"Missing or empty reference to {url[4:]} in cache.")
+    temp.write(bytes)
+  else:
+    download_pdf(url, temp.name)
+
+def download_pdf_and_extract_text(url: str, extra_context: str = '') -> str:
   
   if not url:
     logging.warning("No URL provided, returning only the input text.")
     return extra_context
 
   # hash the inputs into a cache key
-  cache_key = f"text:{hash((url, extra_context, ocr))}"
+  cache_key = f"text:{hash((url, extra_context ))}"
   text = cache.get(cache_key)
   if (text is not None):
     logging.info(f"Using cache for {url}...")
     return text
   
   with tempfile.NamedTemporaryFile() as temp:
-    if url.startswith('ref:'):
-      kwargs = get_reference_from_cache(url[4:], default={})
-      bytes = kwargs.get('content', b'')
-      if not bytes:
-        raise ValueError(f"Missing or empty reference to {url[4:]} in cache.")
-      temp.write(bytes)
-    else:
-      download_pdf(url, temp.name)
+    get_or_download_pdf(url, temp)
     text = extract_text(temp.name)
-    if ocr:
-      temp.seek(0)
-      text = f"{text} {ocr_pdf_bytes(temp.read())}"
     text = f"{text} {extra_context}".strip()
   
   cache.set(cache_key, text)
