@@ -47,7 +47,7 @@ class ProxyRequest(ReferencableRequest):
   url: str
   method: str = 'GET'
 
-class TextRequest(pydantic.BaseModel):
+class TextRequest(BackgroundableRequest):
   url: str = ''
   extra_context: str = ''
 
@@ -98,15 +98,9 @@ def proxy(req:ProxyRequest):
   return make_referenced_response(req.reference, kwargs)
 
 @app.post("/truncate")
-def truncate(req:TruncateRequest):
-  text = download_pdf_and_truncate_text(
-    req.url, 
-    extra_context=req.extra_context,
-    max_tokens=req.max_tokens,
-    model=req.model
-  )
-  return { "text": text }
-
+def truncate(req:TruncateRequest, background_tasks: BackgroundTasks):
+  return background_request(req, background_tasks, truncate_sync)
+  
 @app.post("/ocr")
 def ocr(req:OCRRequest, background_tasks: BackgroundTasks):
   return background_request(req, background_tasks, ocr_sync)
@@ -133,6 +127,17 @@ def docsend2pdf_sync(req:DocsendRequest):
     passcode=req.passcode, 
     searchable=req.searchable)
    return make_referenced_response(req.reference, kwargs)
+
+def truncate_sync(req:TruncateRequest):
+  text = download_pdf_and_truncate_text(
+    req.url, 
+    extra_context=req.extra_context,
+    max_tokens=req.max_tokens,
+    model=req.model
+  )
+  content = json.dumps({ "text": text })
+  kwargs = dict(content=content, headers={'Content-Type': 'application/json'})
+  return make_referenced_response(req.reference, kwargs)
 
 def get_reference_from_cache(key, default=None):
   if not cache.exists(key):
