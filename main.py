@@ -215,9 +215,9 @@ def docsend2pdf_translate(url, csrfmiddlewaretoken, csrftoken, email, passcode='
         else:
             response.raise_for_status()
 
-def rasterize_pdf_to_images(pdf_path:str):
+def rasterize_pdf_to_images(pdf_path:str, output_folder:str = None):
     logging.info(f"Rasterizing PDF {pdf_path} to images...")
-    images = pdf2image.convert_from_path(pdf_path)
+    images = pdf2image.convert_from_path(pdf_path, output_folder=output_folder)
     logging.info(f"Rasterized PDF to {len(images)} images.")
     return images
 
@@ -234,16 +234,17 @@ def ocr_searchable_pdf(url, pool_size:int = 4):
     logging.info(f"Using cache for {url}...")
     return pickle.loads(base64.b64decode(cache.get(cache_key)))
   
-  images = []
-  with tempfile.NamedTemporaryFile() as temp:
-    get_or_download_pdf(url, temp)
-    images = rasterize_pdf_to_images(temp.name)
-
-  total = len(images)
-  inputs = [(image, i, total) for i, image in enumerate(images)]
   pages = []
-  with multiprocessing.Pool(pool_size) as pool:
-    pages = pool.map(ocr_image_to_pdf_page, inputs)
+  with tempfile.TemporaryDirectory() as raster_folder:
+    images = []
+    with tempfile.NamedTemporaryFile() as temp:
+      get_or_download_pdf(url, temp)
+      images = rasterize_pdf_to_images(temp.name, raster_folder)
+
+    total = len(images)
+    inputs = [(image, i, total) for i, image in enumerate(images)]    
+    with multiprocessing.Pool(pool_size) as pool:
+      pages = pool.map(ocr_image_to_pdf_page, inputs)
   
   pdf_writer = PyPDF2.PdfWriter()
   for page in pages:
