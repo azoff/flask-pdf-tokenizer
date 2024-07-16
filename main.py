@@ -22,6 +22,10 @@ import requests
 import tempfile
 import tiktoken
 import time
+import PIL
+
+# because: https://stackoverflow.com/questions/51152059/pillow-in-python-wont-let-me-open-image-exceeds-limit
+PIL.Image.MAX_IMAGE_PIXELS = 933120000
 
 try:
   multiprocessing.set_start_method('spawn')
