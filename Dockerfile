@@ -1,4 +1,4 @@
-FROM python:3-slim-buster as local
+FROM python:3-slim-buster AS local
 
 WORKDIR /app
 
@@ -18,7 +18,7 @@ ENV XDG_RUNTIME_DIR=/tmp
 
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
 
-FROM local as prod
+FROM local AS prod
 
 ADD main.py .
 
