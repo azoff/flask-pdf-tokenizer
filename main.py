@@ -89,7 +89,7 @@ def render(req:RenderRequest):
   pdf = pdf_from_html(req.html)
   kwargs = dict(
     status_code=200,
-    body=pdf.decode("utf-8", errors="ignore"),
+    content=pdf.decode("utf-8", errors="ignore"),
     headers=headers
   )
   return make_referenced_response(req.reference, kwargs)
@@ -105,7 +105,7 @@ def proxy(req:ProxyRequest):
   return make_referenced_response(req.reference, dict(
     status_code=response.status_code,
     headers={k: v for k, v in response.headers.items() if k.lower() != "transfer-encoding"},
-    body=response.content.decode("utf-8", errors="ignore")  # Store as string
+    content=response.content.decode("utf-8", errors="ignore")  # Store as string
   ))
 
 @app.post("/truncate")
@@ -118,10 +118,7 @@ def ocr(req:OCRRequest, background_tasks: BackgroundTasks):
 
 @app.get("/reference/{key}")
 def reference(key:str):
-  cached = get_reference_from_cache(key)
-  response = Response(cached["body"], headers=cached["headers"], status_code=cached["status_code"])
-  response.headers["Content-Length"] = str(len(cached["body"]))
-  return response
+  return Response(**get_reference_from_cache(key))
 
 def background_request(req:BackgroundableRequest, background_tasks: BackgroundTasks, sync_handler: callable):
   resp = None
@@ -158,12 +155,12 @@ def get_reference_from_cache(key, default=None):
     return default
   return pickle.loads(base64.b64decode(cache.get(key)))
 
-def make_referenced_response(seed, kwargs):
+def make_referenced_response(seed, cached):
   if not seed:
-     return Response(**kwargs)
+     return Response(**cached)
   key = make_reference_key(seed)
-  logging.info(f"Caching {len(kwargs['content'])} byte response under {key} for {seed}...")
-  cache.set(key, base64.b64encode(pickle.dumps(kwargs)))
+  logging.info("Caching %d byte response under %s for %s...", len(cached['content']), key, seed)
+  cache.set(key, base64.b64encode(pickle.dumps(cached)))
   return dict(key=key)
 
 def make_reference_key(seed):
@@ -214,7 +211,7 @@ def docsend2pdf_translate(url, csrfmiddlewaretoken, csrftoken, email, passcode='
             logging.info(f"Conversion successful, received {response.headers['Content-Length']} bytes in {time.time() - start_time} seconds.")
             # gzip content
             cached = dict(
-              body=response.content.decode("utf-8", errors="ignore"),
+              content=response.content.decode("utf-8", errors="ignore"),
               status_code=response.status_code,
               headers={
                 'Content-Type': response.headers['Content-Type'],
@@ -266,11 +263,11 @@ def ocr_searchable_pdf(url, pool_size:int = 4):
     pdf_writer.write(f)
     f.seek(0)
     cached = dict(
-      body=f.read().decode("utf-8", errors="ignore"), 
+      content=f.read().decode("utf-8", errors="ignore"), 
       status_code=200, 
       headers={'Content-Type': 'application/pdf'}
     )
-    logging.info(f"OCR complete, caching {len(cached['content'])} bytes under {cache_key}.")
+    logging.info("OCR complete, caching %d bytes under %s.", len(cached['content']), cache_key)
     cache.set(cache_key, base64.b64encode(pickle.dumps(cached)))
     return cached
 
