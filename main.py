@@ -104,7 +104,7 @@ def proxy(req:ProxyRequest):
   response = requests.request(req.method, req.url)
   return make_referenced_response(req.reference, dict(
     status_code=response.status_code,
-    headers={k: v for k, v in response.headers.items() if k.lower() != "transfer-encoding"},
+    headers={k: v for k, v in response.headers.items() if k.lower() not in ("transfer-encoding", "content-encoding")},
     content=response.content.decode("utf-8", errors="ignore")  # Store as string
   ))
 
