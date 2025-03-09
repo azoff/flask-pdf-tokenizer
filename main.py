@@ -7,6 +7,7 @@ import base64
 import hashlib
 import io
 import json
+import gzip
 import logging
 import multiprocessing
 import os
@@ -98,10 +99,8 @@ def docsend2pdf(req:DocsendRequest, background_tasks: BackgroundTasks):
 @app.post("/proxy")
 def proxy(req:ProxyRequest):
   response = requests.request(req.method, req.url)
-  content = response.content.decode('utf-8')
-  # filter out transfer-encoding and content-encoding
   headers = {k: v for k, v in response.headers.items() if k.lower() not in ['transfer-encoding', 'content-encoding']}
-  kwargs = dict(content=content, headers=headers)
+  kwargs = dict(content=response.content, headers=headers)
   return make_referenced_response(req.reference, kwargs)
 
 @app.post("/truncate")
