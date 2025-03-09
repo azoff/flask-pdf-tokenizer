@@ -1,5 +1,7 @@
 BeautifulSoup4
 fastapi
+openpyxl
+pandas
 pdf2image
 pdfkit
 pdfminer.six

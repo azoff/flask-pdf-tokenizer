@@ -11,6 +11,7 @@ import gzip
 import logging
 import multiprocessing
 import os
+import pandas as pd
 import pdf2image
 import pdfkit
 import pickle
@@ -63,6 +64,9 @@ class TruncateRequest(TextRequest):
 class OCRRequest(BackgroundableRequest):
   url: str
 
+class Xlsx2JsonRequest(BackgroundableRequest):
+  url: str
+
 logging.basicConfig(level=logging.INFO)
 
 app = FastAPI()
@@ -110,6 +114,10 @@ def truncate(req:TruncateRequest, background_tasks: BackgroundTasks):
 @app.post("/ocr")
 def ocr(req:OCRRequest, background_tasks: BackgroundTasks):
   return background_request(req, background_tasks, ocr_sync)
+
+@app.post("/xlsx2json")
+def ocr(req:OCRRequest, background_tasks: BackgroundTasks):
+  return background_request(req, background_tasks, xlsx2json_sync)
 
 @app.get("/reference/{key}")
 def reference(key:str):
@@ -229,7 +237,23 @@ def ocr_image_to_pdf_page(args):
     page = pytesseract.image_to_pdf_or_hocr(image, extension='pdf')
     pdf = PyPDF2.PdfReader(io.BytesIO(page))
     return pdf.pages[0]
-    
+
+def convert_xlsx_to_json(url):
+  cache_key = f"xlsx2json:{url}"
+  if cache.exists(cache_key):
+    logging.info(f"Using cache for {url}...")
+    return pickle.loads(base64.b64decode(cache.get(cache_key)))
+  
+  with tempfile.NamedTemporaryFile() as temp:
+    get_or_download_file(url, temp)
+    df = pd.read_excel(temp.name)
+    json_data = df.to_json(orient='records')
+    kwargs = dict(content=json_data.encode('utf-8'), headers={'Content-Type': 'application/json'})
+    logging.info(f"Converted {url} to JSON, caching {len(kwargs['content'])} bytes under {cache_key}.")
+    cache.set(cache_key, base64.b64encode(pickle.dumps(kwargs)))
+    return kwargs
+
+
 def ocr_searchable_pdf(url, pool_size:int = 4):
   cache_key = f"ocr_searchable_pdf:{url}"
   if cache.exists(cache_key):
@@ -240,7 +264,7 @@ def ocr_searchable_pdf(url, pool_size:int = 4):
   with tempfile.TemporaryDirectory() as raster_folder:
     images = []
     with tempfile.NamedTemporaryFile() as temp:
-      get_or_download_pdf(url, temp)
+      get_or_download_file(url, temp)
       images = rasterize_pdf_to_images(temp.name, raster_folder)
 
     total = len(images)
@@ -263,7 +287,11 @@ def ocr_searchable_pdf(url, pool_size:int = 4):
 
 def ocr_sync(req:OCRRequest):
   kwargs = ocr_searchable_pdf(req.url)
-  return make_referenced_response(req.reference, kwargs) 
+  return make_referenced_response(req.reference, kwargs)
+
+def xlsx2json_sync(req:Xlsx2JsonRequest):
+  kwargs = convert_xlsx_to_json(req.url)
+  return make_referenced_response(req.reference, kwargs)
 
 def generate_pdf_from_docsend_url(url, email, passcode='', searchable=True):
     credentials = docsend2pdf_credentials()
@@ -279,7 +307,7 @@ def download_pdf_and_truncate_text(url: str, extra_context: str = '', max_tokens
   text = download_pdf_and_extract_text(url, extra_context=extra_context)
   return truncate_text(text, max_tokens=max_tokens, model=model)
 
-def get_or_download_pdf(url: str, temp: tempfile.NamedTemporaryFile):
+def get_or_download_file(url: str, temp: tempfile.NamedTemporaryFile):
   if url.startswith('ref:'):
     kwargs = get_reference_from_cache(url[4:], default={})
     bytes = kwargs.get('content', b'')
@@ -287,7 +315,7 @@ def get_or_download_pdf(url: str, temp: tempfile.NamedTemporaryFile):
       raise ValueError(f"Missing or empty reference to {url[4:]} in cache.")
     temp.write(bytes)
   else:
-    download_pdf(url, temp.name)
+    download_file(url, temp.name)
 
 def download_pdf_and_extract_text(url: str, extra_context: str = '') -> str:
   
@@ -303,7 +331,7 @@ def download_pdf_and_extract_text(url: str, extra_context: str = '') -> str:
     return text
   
   with tempfile.NamedTemporaryFile() as temp:
-    get_or_download_pdf(url, temp)
+    get_or_download_file(url, temp)
     text = extract_text(temp.name)
     text = f"{text} {extra_context}".strip()
   
@@ -318,10 +346,10 @@ def pdf_from_html(html:str, output_path: Union[str, bool] = False):
   html = re.sub(r'<img[^>]*>', '', html)
   return pdfkit.from_string(html, output_path, options=options, configuration=config)
 
-def download_pdf(url, output_path):
-  logging.info(f"Downloading PDF from {url}...")
+def download_file(url, output_path):
+  logging.info(f"Downloading file from {url}...")
   pdf = urlretrieve(url, output_path)
-  logging.info(f"PDF downloaded.")
+  logging.info(f"File downloaded to {output_path}.")
   return pdf
 
 def truncate_text(text:str, max_tokens:int = 2048, model:str = "gpt-4") -> str:
