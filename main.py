@@ -87,7 +87,11 @@ def render(req:RenderRequest):
   digest = hashlib.sha256(encoded).hexdigest()
   headers = {'Content-Disposition': f'inline; filename="{digest}.pdf"', 'Content-Type': 'application/pdf'}
   pdf = pdf_from_html(req.html)
-  kwargs = dict(content=pdf, headers=headers)
+  kwargs = dict(
+    status_code=200,
+    body=pdf.decode("utf-8", errors="ignore"),
+    headers=headers
+  )
   return make_referenced_response(req.reference, kwargs)
 
 @app.post("/docsend2pdf")
@@ -98,8 +102,11 @@ def docsend2pdf(req:DocsendRequest, background_tasks: BackgroundTasks):
 @app.post("/proxy")
 def proxy(req:ProxyRequest):
   response = requests.request(req.method, req.url)
-  kwargs = dict(content=response.content, headers=response.headers)
-  return make_referenced_response(req.reference, kwargs)
+  return make_referenced_response(req.reference, dict(
+    status_code=response.status_code,
+    headers={k: v for k, v in response.headers.items() if k.lower() != "transfer-encoding"},
+    body=response.content.decode("utf-8", errors="ignore")  # Store as string
+  ))
 
 @app.post("/truncate")
 def truncate(req:TruncateRequest, background_tasks: BackgroundTasks):
@@ -111,7 +118,10 @@ def ocr(req:OCRRequest, background_tasks: BackgroundTasks):
 
 @app.get("/reference/{key}")
 def reference(key:str):
-  return Response(**get_reference_from_cache(key))
+  cached = get_reference_from_cache(key)
+  response = Response(cached["body"], headers=cached["headers"], status_code=cached["status_code"])
+  response.headers["Content-Length"] = str(len(cached["body"]))
+  return response
 
 def background_request(req:BackgroundableRequest, background_tasks: BackgroundTasks, sync_handler: callable):
   resp = None
@@ -125,12 +135,12 @@ def background_request(req:BackgroundableRequest, background_tasks: BackgroundTa
   return resp
 
 def docsend2pdf_sync(req:DocsendRequest):
-   kwargs = generate_pdf_from_docsend_url(
+   cached = generate_pdf_from_docsend_url(
     req.url, 
     req.email, 
     passcode=req.passcode, 
     searchable=req.searchable)
-   return make_referenced_response(req.reference, kwargs)
+   return make_referenced_response(req.reference, cached)
 
 def truncate_sync(req:TruncateRequest):
   text = download_pdf_and_truncate_text(
@@ -203,15 +213,16 @@ def docsend2pdf_translate(url, csrfmiddlewaretoken, csrftoken, email, passcode='
         if response.ok:
             logging.info(f"Conversion successful, received {response.headers['Content-Length']} bytes in {time.time() - start_time} seconds.")
             # gzip content
-            kwargs = dict(
-              content=response.content,
+            cached = dict(
+              body=response.content.decode("utf-8", errors="ignore"),
+              status_code=response.status_code,
               headers={
                 'Content-Type': response.headers['Content-Type'],
                 'Content-Disposition': response.headers.get('Content-Disposition', f'inline; filename="{inputhash}.pdf"')
               }
             )
-            cache.set(cache_key, base64.b64encode(pickle.dumps(kwargs)))
-            return kwargs
+            cache.set(cache_key, base64.b64encode(pickle.dumps(cached)))
+            return cached
         else:
             response.raise_for_status()
 
@@ -254,14 +265,18 @@ def ocr_searchable_pdf(url, pool_size:int = 4):
   with io.BytesIO() as f:
     pdf_writer.write(f)
     f.seek(0)
-    kwargs = dict(content=f.read(), headers={'Content-Type': 'application/pdf'})
-    logging.info(f"OCR complete, caching {len(kwargs['content'])} bytes under {cache_key}.")
-    cache.set(cache_key, base64.b64encode(pickle.dumps(kwargs)))
-    return kwargs
+    cached = dict(
+      body=f.read().decode("utf-8", errors="ignore"), 
+      status_code=200, 
+      headers={'Content-Type': 'application/pdf'}
+    )
+    logging.info(f"OCR complete, caching {len(cached['content'])} bytes under {cache_key}.")
+    cache.set(cache_key, base64.b64encode(pickle.dumps(cached)))
+    return cached
 
 def ocr_sync(req:OCRRequest):
-  kwargs = ocr_searchable_pdf(req.url)
-  return make_referenced_response(req.reference, kwargs) 
+  cached = ocr_searchable_pdf(req.url)
+  return make_referenced_response(req.reference, cached) 
 
 def generate_pdf_from_docsend_url(url, email, passcode='', searchable=True):
     credentials = docsend2pdf_credentials()
