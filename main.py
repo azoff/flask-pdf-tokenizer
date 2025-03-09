@@ -100,7 +100,10 @@ def proxy(req:ProxyRequest):
   response = requests.request(req.method, req.url)
   headers = response.headers
   # remove content-length header
-  del headers['Content-Length']
+  if 'Content-Length' in headers:
+    del headers['Content-Length']
+  if 'Transfer-Encoding' in headers:
+    del headers['Transfer-Encoding']
   kwargs = dict(content=response.content, headers=headers)
   return make_referenced_response(req.reference, kwargs)
 
