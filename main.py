@@ -98,13 +98,7 @@ def docsend2pdf(req:DocsendRequest, background_tasks: BackgroundTasks):
 @app.post("/proxy")
 def proxy(req:ProxyRequest):
   response = requests.request(req.method, req.url)
-  headers = response.headers
-  # remove content-length header
-  if 'Content-Length' in headers:
-    del headers['Content-Length']
-  if 'Transfer-Encoding' in headers:
-    del headers['Transfer-Encoding']
-  kwargs = dict(content=response.content, headers=headers)
+  kwargs = dict(content=response.content, headers=response.headers)
   return make_referenced_response(req.reference, kwargs)
 
 @app.post("/truncate")
