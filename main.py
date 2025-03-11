@@ -106,6 +106,10 @@ def proxy(req:ProxyRequest):
   headers = {k: v for k, v in response.headers.items() if k.lower() not in ['transfer-encoding', 'content-encoding']}
   kwargs = dict(content=response.content, headers=headers)
   return make_referenced_response(req.reference, kwargs)
+
+@app.post("/truncate")
+def truncate(req:TruncateRequest, background_tasks: BackgroundTasks):
+  return background_request(req, background_tasks, truncate_sync)
   
 @app.post("/ocr")
 def ocr(req:OCRRequest, background_tasks: BackgroundTasks):
@@ -116,12 +120,8 @@ def ocr(req:OCRRequest, background_tasks: BackgroundTasks):
   return background_request(req, background_tasks, xlsx2json_sync)
 
 @app.get("/reference/{key}")
-def reference(key: str, truncate: int = None):
-  kwargs = get_reference_from_cache(key)
-  if truncate and 'content' in kwargs:
-    kwargs['content'] = kwargs['content'][:truncate]
-  
-  return Response(**kwargs)
+def reference(key:str):
+  return Response(**get_reference_from_cache(key))
 
 def background_request(req:BackgroundableRequest, background_tasks: BackgroundTasks, sync_handler: callable):
   resp = None
