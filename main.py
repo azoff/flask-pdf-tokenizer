@@ -119,9 +119,7 @@ def ocr(req:OCRRequest, background_tasks: BackgroundTasks):
 def reference(key: str, truncate: int = None):
   kwargs = get_reference_from_cache(key)
   if truncate and 'content' in kwargs:
-    content = kwargs['content'].decode('utf-8')
-    truncated_content = content[:truncate]
-    kwargs['content'] = truncated_content.encode('utf-8')
+    kwargs['content'] = kwargs['content'][:truncate]
   
   return Response(**kwargs)
 
