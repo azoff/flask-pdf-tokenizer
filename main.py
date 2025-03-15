@@ -159,7 +159,39 @@ def get_reference_from_cache(key, default=None):
     return default
   return pickle.loads(base64.b64decode(cache.get(key)))
 
+def extension_from_mimetype(mime_type):
+  mime_types = {
+    'application/pdf': 'pdf',
+    'application/msword': 'docx',
+    'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'docx',
+    'application/vnd.ms-excel': 'xls',
+    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': 'xlsx',
+    'text/plain': 'txt',
+    'text/html': 'html',
+    'text/csv': 'csv',
+    'application/json': 'json',
+    'image/jpeg': 'jpg',
+    'image/png': 'png',
+    'image/gif': 'gif',
+  }
+  return mime_types.get(mime_type, 'blob')
+
+def ensure_content_downloadable(kwargs):
+  if 'content' not in kwargs:
+    raise ValueError("Missing content.")
+  if 'headers' not in kwargs:
+    kwargs['headers'] = {}
+  if 'Content-Type' not in kwargs['headers']:
+    raise ValueError("Missing content-type header.")
+  if 'Content-Disposition' not in kwargs['headers']:
+    # get extension from content-type
+    content_type = kwargs['headers']['Content-Type']
+    extension = extension_from_mimetype(content_type)
+    filename = f"{hashlib.sha256(kwargs['content']).hexdigest()}.{extension}"
+    kwargs['headers']['Content-Disposition'] = f'inline; filename="{filename}"'
+
 def make_referenced_response(seed, kwargs):
+  ensure_content_downloadable(kwargs)
   if not seed:
      return Response(**kwargs)
   key = make_reference_key(seed)
