@@ -29,6 +29,8 @@ import PIL
 # because: https://stackoverflow.com/questions/51152059/pillow-in-python-wont-let-me-open-image-exceeds-limit
 PIL.Image.MAX_IMAGE_PIXELS = 933120000
 
+stripped_headers = ('transfer-encoding', 'content-encoding', 'content-length')
+
 try:
   multiprocessing.set_start_method('spawn')
 except RuntimeError:
@@ -100,7 +102,7 @@ def docsend2pdf(req:DocsendRequest, background_tasks: BackgroundTasks):
 @app.post("/proxy")
 def proxy(req:ProxyRequest):
   response = requests.request(req.method, req.url)
-  headers = {k: v for k, v in response.headers.items() if k.lower() not in ['transfer-encoding', 'content-encoding']}
+  headers = {k: v for k, v in response.headers.items() if k.lower() not in stripped_headers}
   kwargs = dict(content=response.content, headers=headers)
   return make_referenced_response(req.reference, kwargs)
 
@@ -311,11 +313,9 @@ def ocr_searchable_pdf(url, pool_size:int = 4):
     return pickle.loads(base64.b64decode(cache.get(cache_key)))
   
   pages = []
-  with tempfile.TemporaryDirectory() as raster_folder:
-    images = []
-    with tempfile.NamedTemporaryFile() as temp:
-      get_or_download_file(url, temp)
-      images = rasterize_pdf_to_images(temp.name, raster_folder)
+  with tempfile.TemporaryDirectory() as raster_folder, tempfile.NamedTemporaryFile() as temp:
+    file_kwargs = get_or_download_file(url, temp)
+    images = rasterize_pdf_to_images(temp.name, raster_folder)
 
     total = len(images)
     inputs = [(image, i, total) for i, image in enumerate(images)]    
@@ -330,7 +330,8 @@ def ocr_searchable_pdf(url, pool_size:int = 4):
   with io.BytesIO() as f:
     pdf_writer.write(f)
     f.seek(0)
-    kwargs = dict(content=f.read(), headers={'Content-Type': 'application/pdf'})
+    headers = { k: v for k, v in file_kwargs['headers'].items() if k.lower() not in stripped_headers}
+    kwargs = dict(content=f.read(), headers=headers)
     logging.info(f"OCR complete, caching {len(kwargs['content'])} bytes under {cache_key}.")
     cache.set(cache_key, base64.b64encode(pickle.dumps(kwargs)))
     return kwargs
@@ -361,15 +362,18 @@ def download_pdf_and_truncate_text(url: str, extra_context: str = '', max_tokens
   text = download_pdf_and_extract_text(url, extra_context=extra_context)
   return truncate_text(text, max_tokens=max_tokens, model=model)
 
-def get_or_download_file(url: str, temp: tempfile.NamedTemporaryFile):
+def get_or_download_file(url: str, temp: tempfile.NamedTemporaryFile = None):
+  kwargs = None
   if url.startswith('ref:'):
-    kwargs = get_reference_from_cache(url[4:], default={})
-    bytes = kwargs.get('content', b'')
-    if not bytes:
-      raise ValueError(f"Missing or empty reference to {url[4:]} in cache.")
-    temp.write(bytes)
+    kwargs = get_reference_from_cache(url[4:])
   else:
-    download_file(url, temp.name)
+    kwargs = download_file(url)
+  if kwargs is None or kwargs.get('content') is None:
+      raise ValueError(f"Unable to get or download {url}.")
+  if temp is not None:
+    logging.info(f"Writing {len(kwargs['content'])} bytes to {temp.name}...")
+    temp.write(kwargs['content'])
+  return kwargs
 
 def download_pdf_and_extract_text(url: str, extra_context: str = '') -> str:
   
@@ -384,11 +388,10 @@ def download_pdf_and_extract_text(url: str, extra_context: str = '') -> str:
     logging.info(f"Using cache for {url}...")
     return text
   
-  with tempfile.NamedTemporaryFile() as temp:
-    get_or_download_file(url, temp)
-    text = extract_text(temp.name)
-    text = f"{text} {extra_context}".strip()
-  
+  kwargs = get_or_download_file(url)
+  text = extract_text(kwargs['content'])
+  text = f"{text} {extra_context}".strip()
+    
   cache.set(cache_key, text)
   return text
 
@@ -400,11 +403,16 @@ def pdf_from_html(html:str, output_path: Union[str, bool] = False):
   html = re.sub(r'<img[^>]*>', '', html)
   return pdfkit.from_string(html, output_path, options=options, configuration=config)
 
-def download_file(url, output_path):
-  logging.info(f"Downloading file from {url}...")
-  pdf = urlretrieve(url, output_path)
-  logging.info(f"File downloaded to {output_path}.")
-  return pdf
+def download_file(url):
+  logging.info(f"Downloading {url}...")
+  response = requests.get(url)
+  if response.ok:
+    logging.info(f"Downloaded {len(response.content)} bytes from {url}.")
+    headers = {k: v for k, v in response.headers.items() if k.lower() not in stripped_headers}
+    kwargs = dict(content=response.content, headers=headers)
+    return kwargs
+  else:
+    raise ValueError(f"Failed to download file from {url}, status code {response.status_code}.")
 
 def truncate_text(text:str, max_tokens:int = 2048, model:str = "gpt-4") -> str:
   text = text.replace('\n', ' ')
