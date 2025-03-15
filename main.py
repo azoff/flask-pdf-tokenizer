@@ -122,7 +122,9 @@ def docx2txt(req:OCRRequest, background_tasks: BackgroundTasks):
 
 @app.get("/reference/{key}")
 def reference(key:str):
-  return Response(**get_reference_from_cache(key))
+  kwargs = get_reference_from_cache(key)
+  ensure_content_downloadable(kwargs)
+  return Response(**kwargs)
 
 def background_request(req:BackgroundableRequest, background_tasks: BackgroundTasks, sync_handler: callable):
   resp = None
