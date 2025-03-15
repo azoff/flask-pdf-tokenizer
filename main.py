@@ -402,10 +402,11 @@ def download_pdf_and_extract_text(url: str, extra_context: str = '') -> str:
   if (text is not None):
     logging.info(f"Using cache for {url}...")
     return text
-  
-  kwargs = get_or_download_file(url)
-  text = extract_text(kwargs['content'])
-  text = f"{text} {extra_context}".strip()
+
+  with tempfile.NamedTemporaryFile() as temp:  
+    get_or_download_file(url, temp)
+    text = extract_text(temp.name)
+    text = f"{text} {extra_context}".strip()
     
   cache.set(cache_key, text)
   return text
