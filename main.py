@@ -71,9 +71,26 @@ logging.basicConfig(level=logging.INFO)
 app = FastAPI()
 cache = redis.Redis(host=os.getenv('REDIS_HOST'), port=6379, decode_responses=True)
 
+# catch requests.HTTPError and return the underlying status, and returning the error message in json
+@app.exception_handler(requests.HTTPError)
+def http_exception_handler(request, exc):
+  status_code = exc.response.status_code
+  # use the exception error message as the error message
+  if hasattr(exc, 'message'):
+    error = exc.message
+  else:
+    error = str(exc)
+  try:
+    reason = exc.response.json()
+  except json.JSONDecodeError:
+    reason = exc.response.text
+  content = json.dumps({ 'error': error, 'reason': reason })
+  return Response(content=content, media_type='application/json', status_code=status_code)
+
+
 # print errors as json
 @app.exception_handler(Exception)
-def uncaught_exception_handler(request, exc):
+def uncaught_exception_handler(_, exc):
   return Response(content=json.dumps({ 'error': str(exc) }), media_type='application/json', status_code=500)
 
 @app.get("/")
@@ -101,7 +118,7 @@ def docsend2pdf(req:DocsendRequest, background_tasks: BackgroundTasks):
 
 @app.post("/proxy")
 def proxy(req:ProxyRequest):
-  response = requests.request(req.method, req.url)
+  response = get_or_download_file(req.url, method=req.method)
   headers = {k: v for k, v in response.headers.items() if k.lower() not in stripped_headers}
   kwargs = dict(content=response.content, headers=headers)
   return make_referenced_response(req.reference, kwargs)
@@ -362,12 +379,12 @@ def download_pdf_and_truncate_text(url: str, extra_context: str = '', max_tokens
   text = download_pdf_and_extract_text(url, extra_context=extra_context)
   return truncate_text(text, max_tokens=max_tokens, model=model)
 
-def get_or_download_file(url: str, temp: tempfile.NamedTemporaryFile = None):
+def get_or_download_file(url: str, temp: tempfile.NamedTemporaryFile = None, method = 'GET'):
   kwargs = None
   if url.startswith('ref:'):
     kwargs = get_reference_from_cache(url[4:])
   else:
-    kwargs = download_file(url)
+    kwargs = download_file(url, method=method)
   if kwargs is None or kwargs.get('content') is None:
       raise ValueError(f"Unable to get or download {url}.")
   if temp is not None:
@@ -403,16 +420,19 @@ def pdf_from_html(html:str, output_path: Union[str, bool] = False):
   html = re.sub(r'<img[^>]*>', '', html)
   return pdfkit.from_string(html, output_path, options=options, configuration=config)
 
-def download_file(url):
-  logging.info(f"Downloading {url}...")
-  response = requests.get(url)
+def download_file(url, method='GET'):
+  logging.info(f"Downloading: {method} {url}...")
+  response = requests.request(method, url)
   if response.ok:
     logging.info(f"Downloaded {len(response.content)} bytes from {url}.")
     headers = {k: v for k, v in response.headers.items() if k.lower() not in stripped_headers}
     kwargs = dict(content=response.content, headers=headers)
     return kwargs
   else:
-    raise ValueError(f"Failed to download file from {url}, status code {response.status_code}.")
+    message = f"Failed to download {url}: {response.status_code} {response.reason}"
+    logging.error(message)
+    response.status_code = 502 # Bad Gateway
+    raise requests.HTTPError(message, response=response)
 
 def truncate_text(text:str, max_tokens:int = 2048, model:str = "gpt-4") -> str:
   text = text.replace('\n', ' ')
