@@ -7,7 +7,7 @@ import base64
 import hashlib
 import io
 import json
-import gzip
+import docx
 import logging
 import multiprocessing
 import os
@@ -64,9 +64,6 @@ class TruncateRequest(TextRequest):
 class OCRRequest(BackgroundableRequest):
   url: str
 
-class Xlsx2JsonRequest(BackgroundableRequest):
-  url: str
-
 logging.basicConfig(level=logging.INFO)
 
 app = FastAPI()
@@ -116,8 +113,12 @@ def ocr(req:OCRRequest, background_tasks: BackgroundTasks):
   return background_request(req, background_tasks, ocr_sync)
 
 @app.post("/xlsx2json")
-def ocr(req:OCRRequest, background_tasks: BackgroundTasks):
+def xlsx2json(req:OCRRequest, background_tasks: BackgroundTasks):
   return background_request(req, background_tasks, xlsx2json_sync)
+
+@app.post("/docx2txt")
+def docx2txt(req:OCRRequest, background_tasks: BackgroundTasks):
+  return background_request(req, background_tasks, docx2txt_sync)
 
 @app.get("/reference/{key}")
 def reference(key:str):
@@ -252,7 +253,22 @@ def convert_xlsx_to_json(url):
     logging.info(f"Converted {url} to JSON, caching {len(kwargs['content'])} bytes under {cache_key}.")
     cache.set(cache_key, base64.b64encode(pickle.dumps(kwargs)))
     return kwargs
-
+  
+def convert_docx_to_txt(url):
+  cache_key = f"docx2txt:{url}"
+  if cache.exists(cache_key):
+    logging.info(f"Using cache for {url}...")
+    return pickle.loads(base64.b64decode(cache.get(cache_key)))
+  
+  with tempfile.NamedTemporaryFile() as temp:
+    get_or_download_file(url, temp)
+    with open(temp.name, 'rb') as f:
+      doc = docx.Document(f)
+      content = '\n'.join([paragraph.text for paragraph in doc.paragraphs])
+      kwargs = dict(content=content.encode('utf-8'), headers={'Content-Type': 'text/plain'})
+      logging.info(f"Converted {url} to text, caching {len(kwargs['content'])} bytes under {cache_key}.")
+      cache.set(cache_key, base64.b64encode(pickle.dumps(kwargs)))
+      return kwargs
 
 def ocr_searchable_pdf(url, pool_size:int = 4):
   cache_key = f"ocr_searchable_pdf:{url}"
@@ -289,8 +305,12 @@ def ocr_sync(req:OCRRequest):
   kwargs = ocr_searchable_pdf(req.url)
   return make_referenced_response(req.reference, kwargs)
 
-def xlsx2json_sync(req:Xlsx2JsonRequest):
+def xlsx2json_sync(req:OCRRequest):
   kwargs = convert_xlsx_to_json(req.url)
+  return make_referenced_response(req.reference, kwargs)
+
+def docx2txt_sync(req:OCRRequest):
+  kwargs = convert_docx_to_txt(req.url)
   return make_referenced_response(req.reference, kwargs)
 
 def generate_pdf_from_docsend_url(url, email, passcode='', searchable=True):
