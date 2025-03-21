@@ -409,10 +409,11 @@ def download_pdf_and_extract_text(url: str, extra_context: str = '') -> str:
 
   # add extra text context
   # clean non-ascii characters from text
-  # and remove redundant whitespace
+  # and remove redundant whitespace, plus trim
   text = f"{extra_context}\n\n{text}"
   text = re.sub(r'[^\x00-\x7F]+', ' ', text)
-  text = re.sub(r'\s+', ' ', text).trim()
+  text = re.sub(r'\s+', ' ', text)
+  text = text.strip()
 
   logging.info(f"Extracted {len(text)} characters from {url}, caching under {cache_key}.")    
   cache.set(cache_key, text)
