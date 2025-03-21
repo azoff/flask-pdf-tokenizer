@@ -406,8 +406,15 @@ def download_pdf_and_extract_text(url: str, extra_context: str = '') -> str:
   with tempfile.NamedTemporaryFile() as temp:  
     get_or_download_file(url, temp)
     text = extract_text(temp.name)
-    text = f"{text} {extra_context}".strip()
-    
+
+  # add extra text context
+  # clean non-ascii characters from text
+  # and remove redundant whitespace
+  text = f"{extra_context}\n\n{text}"
+  text = re.sub(r'[^\x00-\x7F]+', ' ', text)
+  text = re.sub(r'\s+', ' ', text).trim()
+
+  logging.info(f"Extracted {len(text)} characters from {url}, caching under {cache_key}.")    
   cache.set(cache_key, text)
   return text
 
