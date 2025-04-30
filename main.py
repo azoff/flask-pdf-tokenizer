@@ -9,7 +9,6 @@ import io
 import json
 import docx
 import logging
-import multiprocessing
 import os
 import pandas as pd
 import pdf2image
@@ -30,11 +29,6 @@ import PIL
 PIL.Image.MAX_IMAGE_PIXELS = 933120000
 
 stripped_headers = ('transfer-encoding', 'content-encoding', 'content-length')
-
-try:
-  multiprocessing.set_start_method('spawn')
-except RuntimeError:
-    pass
 
 class ReferencableRequest(pydantic.BaseModel):
   reference: str = ''
@@ -283,8 +277,7 @@ def rasterize_pdf_to_images(pdf_path:str, output_folder:str = None):
     logging.info(f"Rasterized PDF to {len(images)} images.")
     return images
 
-def ocr_image_to_pdf_page(args):
-    image, i, total = args
+def ocr_image_to_pdf_page(image, i, total):
     logging.info(f"Running OCR on page {i+1} of {total}...")
     page = pytesseract.image_to_pdf_or_hocr(image, extension='pdf')
     pdf = PyPDF2.PdfReader(io.BytesIO(page))
@@ -321,7 +314,7 @@ def convert_docx_to_txt(url):
       cache.set(cache_key, base64.b64encode(pickle.dumps(kwargs)))
       return kwargs
 
-def ocr_searchable_pdf(url, pool_size:int = 4):
+def ocr_searchable_pdf(url):
   cache_key = f"ocr_searchable_pdf:{url}"
   if cache.exists(cache_key):
     logging.info(f"Using cache for {url}...")
@@ -334,8 +327,12 @@ def ocr_searchable_pdf(url, pool_size:int = 4):
 
     total = len(images)
     inputs = [(image, i, total) for i, image in enumerate(images)]    
-    with multiprocessing.Pool(pool_size) as pool:
-      pages = pool.map(ocr_image_to_pdf_page, inputs)
+    for image, i, total in inputs:
+      page = ocr_image_to_pdf_page(image, i, total)
+      pages.append(page)
+      # Free memory by closing the image
+      image.close()
+      del image
   
   pdf_writer = PyPDF2.PdfWriter()
   for page in pages:
