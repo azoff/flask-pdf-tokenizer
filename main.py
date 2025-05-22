@@ -382,7 +382,7 @@ def ocr_searchable_pdf(url: str) -> dict[str, Any]:
         f.seek(0)
         headers: dict[str, Any] = {'Content-Type': 'application/pdf'}
         for k, v in file_kwargs.items():
-            if k.lower() not in stripped_headers:
+            if k.lower() not in stripped_headers and v:
                 headers[k] = str(v)
         kwargs = dict(content=f.read(), headers=headers)
         logging.info(
