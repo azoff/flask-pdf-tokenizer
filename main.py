@@ -6,7 +6,6 @@ import logging
 import os
 import pickle
 import re
-import time
 from tempfile import (
     NamedTemporaryFile, TemporaryDirectory)
 from typing import Any, Callable, TypeVar, Union
@@ -21,7 +20,7 @@ import pytesseract
 import redis
 import requests
 import tiktoken
-from bs4 import BeautifulSoup
+from docsend import DocSend
 from fastapi import BackgroundTasks, FastAPI, Response
 from pdfminer.high_level import extract_text
 from PIL import Image
@@ -46,8 +45,7 @@ class BackgroundableRequest(ReferencableRequest):
 class DocsendRequest(BackgroundableRequest):
     url: str
     email: str
-    passcode: str = ''
-    searchable: bool = True
+    passcode: str | None = None
 
 
 class RenderRequest(ReferencableRequest):
@@ -182,8 +180,7 @@ def docsend2pdf_sync(req: DocsendRequest):
     kwargs = generate_pdf_from_docsend_url(
         req.url,
         req.email,
-        passcode=req.passcode,
-        searchable=req.searchable)
+        passcode=req.passcode)
     return make_referenced_response(req.reference, kwargs)
 
 
@@ -258,78 +255,47 @@ def make_reference_key(seed: str) -> str:
     return hashlib.sha256(seed.encode('utf-8')).hexdigest()
 
 
-def docsend2pdf_credentials() -> dict[str, str]:
-    # Make a GET request to fetch the initial page and extract CSRF tokens
-    with requests.Session() as session:
-        start_time = time.time()
-        logging.info("Fetching docsend2pdf CSRF tokens...")
-        response = session.get('https://docsend2pdf.com')
-        logging.info(
-            f"Received docsend2pdf CSRF tokens in {time.time() - start_time} seconds.")
-        if response.ok:
-            cookies = session.cookies.get_dict()
-            csrftoken = cookies.get('csrftoken', '')
-            soup = BeautifulSoup(response.text, 'html.parser')
-            csrfmiddlewaretoken = str(soup.find(
-                'input', {'name': 'csrfmiddlewaretoken'}).get('value', ''))  # type: ignore[attr-defined]
-            if not csrftoken or not csrfmiddlewaretoken:
-                logging.warning("incomplete CSRF tokens state, csrftoken: %s, csrfmiddlewaretoken: %s. response: %s",
-                                csrftoken, csrfmiddlewaretoken, response.text)
-            return {'csrfmiddlewaretoken': csrfmiddlewaretoken, 'csrftoken': csrftoken}
-        else:
-            response.raise_for_status()
-    return dict()
-
-
-def docsend2pdf_translate(url: str,
-                          csrfmiddlewaretoken: str,
-                          csrftoken: str,
-                          email: str,
-                          passcode: str = '',
-                          searchable: bool = False) -> dict[str, Any] | Response:
-    inputhash = hash((url, email, passcode, searchable))
+def generate_pdf_from_docsend_url(url: str,
+                                  email: str,
+                                  passcode: str | None = None) -> dict[str, Any]:
+    inputhash = hash((url, email, passcode))
     cache_key = f"docsend2pdf:{inputhash}"
     if cache.exists(cache_key):
         logging.info(f"Using cache for {url}...")
         return pickle.loads(base64.b64decode(str(cache.get(cache_key))))
-    with requests.Session() as session:
-        # Include csrftoken in session cookies
-        session.cookies.set('csrftoken', csrftoken)  # type: ignore[attr-defined]
-        headers = {
-            'Content-Type': 'application/x-www-form-urlencoded',
-            'Referer': 'https://docsend2pdf.com/'
-        }
-        data = {
-            'csrfmiddlewaretoken': csrfmiddlewaretoken,
-            'url': url,
-            'email': email,
-            'passcode': passcode,
-        }
-        if searchable:
-            data['searchable'] = 'on'
-        # Make a POST request to submit the form data
-        start_time = time.time()
-        logging.info(f"Converting {url} on behalf of {email}...")
-        response = session.post('https://docsend2pdf.com', headers=headers,
-                                data=data, allow_redirects=True, timeout=60)
-        if response.ok:
-            logging.info("Conversion successful, received %s bytes in %s seconds.",
-                         response.headers['Content-Length'],
-                         time.time() - start_time)
-            # gzip content
-            kwargs = dict(
-                content=response.content,
-                headers={
-                    'Content-Type': response.headers['Content-Type'],
-                    'Content-Disposition':
-                        response.headers.get('Content-Disposition', f'inline; filename="{inputhash}.pdf"')
-                }
-            )
-            cache.set(cache_key, base64.b64encode(pickle.dumps(kwargs)))
-            return kwargs
-        else:
-            response.raise_for_status()
-    return dict()
+
+    doc_id = url.split('/')[-1]
+    doc = DocSend(doc_id=doc_id)
+    logging.info(f"Attempting to download docsend doc {doc_id}...")
+
+    logging.info("Fetching metadata...")
+    doc.fetch_meta()  # type: ignore[attr-defined]
+
+    assert doc.pages > 0, f"Docsend doc {doc_id} is empty!"
+    logging.info(f"Docsend doc {doc_id} has {doc.pages} pages...")
+
+    if email:
+        logging.info(f"Authorizing using {email}...")
+        if not passcode:
+            passcode = None
+        doc.authorize(email=email, passcode=passcode)  # type: ignore[attr-defined]
+
+    logging.info("Fetching images...")
+    doc.fetch_images()  # type: ignore[attr-defined]
+
+    logging.info("Saving images to PDF...")
+    with NamedTemporaryFile() as temp:
+        doc.save_pdf(temp.name)  # type: ignore[attr-defined]
+        with open(temp.name, 'rb') as f:
+            content = f.read()
+            headers = {
+                'Content-Type': 'application/pdf',
+                'Content-Disposition': f'inline; filename="{doc_id}.pdf"'
+            }
+            logging.info(
+                f"Downloaded {url} to PDF, caching {len(content)} bytes under {cache_key}.")
+            cache.set(cache_key, base64.b64encode(pickle.dumps(dict(content=content, headers=headers))))
+            return dict(content=content, headers=headers)
 
 
 def rasterize_pdf_to_images(pdf_path: str, output_folder: str | None = None):
@@ -438,15 +404,6 @@ def xlsx2json_sync(req: OCRRequest):
 def docx2txt_sync(req: OCRRequest):
     kwargs = convert_docx_to_txt(req.url)
     return make_referenced_response(req.reference, kwargs)
-
-
-def generate_pdf_from_docsend_url(url: str, email: str, passcode: str = '', searchable: bool = True):
-    credentials = docsend2pdf_credentials()
-    return docsend2pdf_translate(url,
-                                 email=email,
-                                 passcode=passcode,
-                                 searchable=searchable,
-                                 **credentials)
 
 
 def download_pdf_and_truncate_text(url: str,
