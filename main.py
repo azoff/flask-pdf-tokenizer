@@ -506,13 +506,43 @@ def download_pdf_and_extract_text(url: str, extra_context: str = '') -> str:
     return _text_agg
 
 
-def pdf_from_html(html: str, output_path: Union[str, bool] = False):
-    config = pdfkit.configuration(wkhtmltopdf=os.getenv('WKHTMLTOPDF_PATH'))  # type: ignore[attr-defined]
-    options = {"load-error-handling": "ignore",
-               "load-media-error-handling": "ignore"}
+def clean_html(html: str) -> str:
+    # Add proper HTML header with charset declaration
+    if "<head>" not in html:
+        html = f"""
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PDF Document</title>
+</head>
+<body>
+{html}
+</body>
+</html>
+"""
+    else:
+        # If there's already a head tag, just ensure charset is set
+        if "charset" not in html:
+            html = html.replace("<head>", '<head>\n    <meta charset="UTF-8">')
     # remove all image tags
     # see: https://github.com/wkhtmltopdf/wkhtmltopdf/issues/4408
     html = re.sub(r'<img[^>]*>', '', html)
+    return html
+
+
+def pdf_from_html(html: str, output_path: Union[str, bool] = False):
+    config = pdfkit.configuration(wkhtmltopdf=os.getenv('WKHTMLTOPDF_PATH'))  # type: ignore[attr-defined]
+    options = {
+        "load-error-handling": "ignore",
+        "load-media-error-handling": "ignore",
+        "encoding": "UTF-8",
+        "enable-local-file-access": "",
+        "disable-smart-shrinking": "",
+        "no-background": "",
+    }
+    html = clean_html(html)
     return pdfkit.from_string(html, output_path, options=options, configuration=config)  # type: ignore[attr-defined]
 
 
