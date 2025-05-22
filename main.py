@@ -230,6 +230,9 @@ def ensure_content_downloadable(kwargs: dict[str, Any]):
         raise ValueError("Missing content.")
     if 'headers' not in kwargs:
         kwargs['headers'] = {}
+    if 'content' in kwargs['headers']:
+        logging.warning("seems like a content header, seems like a mistake so I'm removing it...")
+        del kwargs['headers']['content']
     if 'Content-Type' not in kwargs['headers']:
         raise ValueError("Missing content-type header.")
     if 'Content-Disposition' not in kwargs['headers']:
@@ -385,7 +388,8 @@ def ocr_searchable_pdf(url: str) -> dict[str, Any]:
         pdf_writer.write(f)  # type: ignore[attr-defined]
         f.seek(0)
         headers: dict[str, Any] = {'Content-Type': 'application/pdf'}
-        for k, v in file_kwargs.items():
+        file_headers: dict[str, Any] = file_kwargs.get('headers', {})  # type: ignore[attr-defined]
+        for k, v in file_headers.items():  
             if k.lower() not in stripped_headers and v:
                 headers[k] = str(v)
         kwargs = dict(content=f.read(), headers=headers)
