@@ -158,6 +158,10 @@ def docx2txt(req: OCRRequest, background_tasks: BackgroundTasks):
 @app.get("/reference/{key}")
 def reference(key: str):
     kwargs = get_reference_from_cache(key)
+    if kwargs is None:
+        logging.warning(f"Reference cache miss for {key}...")
+        return Response(content=json.dumps({'error': 'Not Found', 'reason': f"{key} not found in reference cache."}),
+                        media_type='application/json', status_code=404)
     ensure_content_downloadable(kwargs)
     return Response(**kwargs)
 
