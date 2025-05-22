@@ -380,7 +380,7 @@ def ocr_searchable_pdf(url: str) -> dict[str, Any]:
     with io.BytesIO() as f:
         pdf_writer.write(f)  # type: ignore[attr-defined]
         f.seek(0)
-        headers: dict[str, Any] = dict()
+        headers: dict[str, Any] = {'Content-Type': 'application/pdf'}
         for k, v in file_kwargs.items():
             if k.lower() not in stripped_headers:
                 headers[k] = str(v)
