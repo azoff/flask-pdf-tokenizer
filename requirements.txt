@@ -1,3 +1,4 @@
+autopep8
 BeautifulSoup4
 fastapi
 openpyxl
@@ -6,6 +7,7 @@ pdf2image
 pdfkit
 pdfminer.six
 pydantic
+pylint
 PyPDF2
 pytesseract
 python-docx

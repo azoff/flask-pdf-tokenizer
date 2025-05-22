@@ -1,32 +1,36 @@
-from bs4 import BeautifulSoup
-from fastapi import FastAPI, Response, BackgroundTasks
-from pdfminer.high_level import extract_text
-from typing import Union
-from urllib.request import urlretrieve
 import base64
 import hashlib
 import io
 import json
-import docx
 import logging
 import os
+import pickle
+import re
+import time
+from tempfile import (
+    NamedTemporaryFile, TemporaryDirectory)
+from typing import Any, Callable, TypeVar, Union
+
+import docx
 import pandas as pd
 import pdf2image
 import pdfkit
-import pickle
 import pydantic
 import PyPDF2
 import pytesseract
-import re
 import redis
 import requests
-import tempfile
 import tiktoken
-import time
-import PIL
+from bs4 import BeautifulSoup
+from fastapi import BackgroundTasks, FastAPI, Response
+from pdfminer.high_level import extract_text
+from PIL import Image
+from requests import HTTPError
 
-# because: https://stackoverflow.com/questions/51152059/pillow-in-python-wont-let-me-open-image-exceeds-limit
-PIL.Image.MAX_IMAGE_PIXELS = 933120000
+T = TypeVar('T', bound='BackgroundableRequest')
+
+# fixes: https://stackoverflow.com/q/51152059
+Image.MAX_IMAGE_PIXELS = 933120000
 
 stripped_headers = ('transfer-encoding', 'content-encoding', 'content-length')
 
@@ -72,20 +76,19 @@ class OCRRequest(BackgroundableRequest):
 logging.basicConfig(level=logging.INFO)
 
 app = FastAPI()
-cache = redis.Redis(host=os.getenv('REDIS_HOST'),
+cache = redis.Redis(host=os.getenv('REDIS_HOST', 'localhost'),
                     port=6379, decode_responses=True)
 
-# catch requests.HTTPError and return the underlying status, and returning the error message in json
 
-
-@app.exception_handler(requests.HTTPError)
-def http_exception_handler(request, exc):
+@app.exception_handler(HTTPError)
+def http_exception_handler(_, exc: HTTPError):
+    """
+    catch requests.HTTPError and return the underlying status,
+    and returning the error message in json
+    """
     status_code = exc.response.status_code
     # use the exception error message as the error message
-    if hasattr(exc, 'message'):
-        error = exc.message
-    else:
-        error = str(exc)
+    error = str(exc)
     try:
         reason = exc.response.json()
     except json.JSONDecodeError:
@@ -96,7 +99,7 @@ def http_exception_handler(request, exc):
 
 # print errors as json
 @app.exception_handler(Exception)
-def uncaught_exception_handler(_, exc):
+def uncaught_exception_handler(_, exc: Exception):
     return Response(content=json.dumps({'error': str(exc)}), media_type='application/json', status_code=500)
 
 
@@ -107,9 +110,9 @@ def index():
 
 @app.post("/text")
 def text(req: TextRequest):
-    text = download_pdf_and_extract_text(
+    _text = download_pdf_and_extract_text(
         req.url, extra_context=req.extra_context)
-    return {"text": text}
+    return {"text": _text}
 
 
 @app.post("/render")
@@ -161,14 +164,16 @@ def reference(key: str):
     return Response(**kwargs)
 
 
-def background_request(req: BackgroundableRequest, background_tasks: BackgroundTasks, sync_handler: callable):
-    resp = None
+def background_request(req: T,
+                       background_tasks: BackgroundTasks,
+                       sync_handler: Callable[[T], Any]) -> dict[str, str]:
+    resp: dict[str, str] = {}
     if req.asynchronous:
         background_tasks.add_task(sync_handler, req)
         resp = dict(key=make_reference_key(req.reference))
     else:
         resp = sync_handler(req)
-    if isinstance(resp, dict) and 'key' in resp:
+    if 'key' in resp:
         logging.info(f"Returning reference key {resp['key']}...")
     return resp
 
@@ -183,25 +188,25 @@ def docsend2pdf_sync(req: DocsendRequest):
 
 
 def truncate_sync(req: TruncateRequest):
-    text = download_pdf_and_truncate_text(
+    _text = download_pdf_and_truncate_text(
         req.url,
         extra_context=req.extra_context,
         max_tokens=req.max_tokens,
         model=req.model
     )
-    content = json.dumps({"text": text})
+    content = json.dumps({"text": _text})
     kwargs = dict(content=content, headers={
                   'Content-Type': 'application/json'})
     return make_referenced_response(req.reference, kwargs)
 
 
-def get_reference_from_cache(key, default=None):
+def get_reference_from_cache(key: str, default: Any = None) -> Any:
     if not cache.exists(key):
         return default
-    return pickle.loads(base64.b64decode(cache.get(key)))
+    return pickle.loads(base64.b64decode(str(cache.get(key))))
 
 
-def extension_from_mimetype(mime_type):
+def extension_from_mimetype(mime_type: str) -> str:
     mime_types = {
         'application/pdf': 'pdf',
         'application/msword': 'docx',
@@ -219,7 +224,7 @@ def extension_from_mimetype(mime_type):
     return mime_types.get(mime_type, 'blob')
 
 
-def ensure_content_downloadable(kwargs):
+def ensure_content_downloadable(kwargs: dict[str, Any]):
     if 'content' not in kwargs:
         raise ValueError("Missing content.")
     if 'headers' not in kwargs:
@@ -228,24 +233,28 @@ def ensure_content_downloadable(kwargs):
         raise ValueError("Missing content-type header.")
     if 'Content-Disposition' not in kwargs['headers']:
         # get extension from content-type
-        content_type = kwargs['headers']['Content-Type']
+        content_type = kwargs.get('headers', dict()).get('Content-Type', '')
         extension = extension_from_mimetype(content_type)
         filename = f"{hashlib.sha256(kwargs['content']).hexdigest()}.{extension}"
         kwargs['headers']['Content-Disposition'] = f'inline; filename="{filename}"'
 
 
-def make_referenced_response(seed, kwargs):
-    ensure_content_downloadable(kwargs)
+def make_referenced_response(seed: str, kwargs: dict[str, Any] | Response) -> Response | dict[str, str]:
+    kwargs_dict = kwargs if isinstance(kwargs, dict) else dict(content=kwargs.body, headers=kwargs.headers)
+    ensure_content_downloadable(kwargs_dict)
     if not seed:
-        return Response(**kwargs)
+        if isinstance(kwargs, dict):
+            return Response(**kwargs)
+        else:
+            return kwargs
     key = make_reference_key(seed)
     logging.info(
-        f"Caching {len(kwargs['content'])} byte response under {key} for {seed}...")
-    cache.set(key, base64.b64encode(pickle.dumps(kwargs)))
+        f"Caching {len(kwargs_dict['content'])} byte response under {key} for {seed}...")
+    cache.set(key, base64.b64encode(pickle.dumps(kwargs_dict)))
     return dict(key=key)
 
 
-def make_reference_key(seed):
+def make_reference_key(seed: str) -> str:
     return hashlib.sha256(seed.encode('utf-8')).hexdigest()
 
 
@@ -253,7 +262,7 @@ def docsend2pdf_credentials() -> dict[str, str]:
     # Make a GET request to fetch the initial page and extract CSRF tokens
     with requests.Session() as session:
         start_time = time.time()
-        logging.info(f"Fetching docsend2pdf CSRF tokens...")
+        logging.info("Fetching docsend2pdf CSRF tokens...")
         response = session.get('https://docsend2pdf.com')
         logging.info(
             f"Received docsend2pdf CSRF tokens in {time.time() - start_time} seconds.")
@@ -261,26 +270,31 @@ def docsend2pdf_credentials() -> dict[str, str]:
             cookies = session.cookies.get_dict()
             csrftoken = cookies.get('csrftoken', '')
             soup = BeautifulSoup(response.text, 'html.parser')
-            csrfmiddlewaretoken = soup.find(
-                'input', {'name': 'csrfmiddlewaretoken'}).get('value', '')
+            csrfmiddlewaretoken = str(soup.find(
+                'input', {'name': 'csrfmiddlewaretoken'}).get('value', ''))  # type: ignore[attr-defined]
             if not csrftoken or not csrfmiddlewaretoken:
-                logging.warning(
-                    f"incomplete CSRF tokens state, csrftoken: {csrftoken}, csrfmiddlewaretoken: {csrfmiddlewaretoken}. response: {response.text}")
+                logging.warning("incomplete CSRF tokens state, csrftoken: %s, csrfmiddlewaretoken: %s. response: %s",
+                                csrftoken, csrfmiddlewaretoken, response.text)
             return {'csrfmiddlewaretoken': csrfmiddlewaretoken, 'csrftoken': csrftoken}
         else:
             response.raise_for_status()
     return dict()
 
 
-def docsend2pdf_translate(url, csrfmiddlewaretoken, csrftoken, email, passcode='', searchable=False):
+def docsend2pdf_translate(url: str,
+                          csrfmiddlewaretoken: str,
+                          csrftoken: str,
+                          email: str,
+                          passcode: str = '',
+                          searchable: bool = False) -> dict[str, Any] | Response:
     inputhash = hash((url, email, passcode, searchable))
     cache_key = f"docsend2pdf:{inputhash}"
     if cache.exists(cache_key):
         logging.info(f"Using cache for {url}...")
-        return pickle.loads(base64.b64decode(cache.get(cache_key)))
+        return pickle.loads(base64.b64decode(str(cache.get(cache_key))))
     with requests.Session() as session:
         # Include csrftoken in session cookies
-        session.cookies.set('csrftoken', csrftoken)
+        session.cookies.set('csrftoken', csrftoken)  # type: ignore[attr-defined]
         headers = {
             'Content-Type': 'application/x-www-form-urlencoded',
             'Referer': 'https://docsend2pdf.com/'
@@ -299,46 +313,51 @@ def docsend2pdf_translate(url, csrfmiddlewaretoken, csrftoken, email, passcode='
         response = session.post('https://docsend2pdf.com', headers=headers,
                                 data=data, allow_redirects=True, timeout=60)
         if response.ok:
-            logging.info(
-                f"Conversion successful, received {response.headers['Content-Length']} bytes in {time.time() - start_time} seconds.")
+            logging.info("Conversion successful, received %s bytes in %s seconds.",
+                         response.headers['Content-Length'],
+                         time.time() - start_time)
             # gzip content
             kwargs = dict(
                 content=response.content,
                 headers={
                     'Content-Type': response.headers['Content-Type'],
-                    'Content-Disposition': response.headers.get('Content-Disposition', f'inline; filename="{inputhash}.pdf"')
+                    'Content-Disposition':
+                        response.headers.get('Content-Disposition', f'inline; filename="{inputhash}.pdf"')
                 }
             )
             cache.set(cache_key, base64.b64encode(pickle.dumps(kwargs)))
             return kwargs
         else:
             response.raise_for_status()
+    return dict()
 
 
-def rasterize_pdf_to_images(pdf_path: str, output_folder: str = None):
+def rasterize_pdf_to_images(pdf_path: str, output_folder: str | None = None):
     logging.info(f"Rasterizing PDF {pdf_path} to images...")
-    images = pdf2image.convert_from_path(pdf_path, output_folder=output_folder)
+    images = pdf2image.convert_from_path(pdf_path, output_folder=output_folder)  # type: ignore[attr-defined]
     logging.info(f"Rasterized PDF to {len(images)} images.")
     return images
 
 
-def ocr_image_to_pdf_page(image, i, total):
+def ocr_image_to_pdf_page(image: Image.Image, i: int, total: int) -> PyPDF2.PageObject:
     logging.info(f"Running OCR on page {i+1} of {total}...")
-    page = pytesseract.image_to_pdf_or_hocr(image, extension='pdf')
+    page = pytesseract.image_to_pdf_or_hocr(image, extension='pdf')  # type: ignore[attr-defined]
+    if isinstance(page, str):
+        page = page.encode('utf-8')
     pdf = PyPDF2.PdfReader(io.BytesIO(page))
     return pdf.pages[0]
 
 
-def convert_xlsx_to_json(url):
+def convert_xlsx_to_json(url: str):
     cache_key = f"xlsx2json:{url}"
     if cache.exists(cache_key):
         logging.info(f"Using cache for {url}...")
-        return pickle.loads(base64.b64decode(cache.get(cache_key)))
+        return pickle.loads(base64.b64decode(str(cache.get(cache_key))))
 
-    with tempfile.NamedTemporaryFile() as temp:
+    with NamedTemporaryFile() as temp:
         get_or_download_file(url, temp)
-        df = pd.read_excel(temp.name)
-        json_data = df.to_json(orient='records')
+        df = pd.read_excel(temp.name)  # type: ignore[attr-defined]
+        json_data = df.to_json(orient='records')  # type: ignore[attr-defined]
         kwargs = dict(content=json_data.encode('utf-8'),
                       headers={'Content-Type': 'application/json'})
         logging.info(
@@ -347,13 +366,13 @@ def convert_xlsx_to_json(url):
         return kwargs
 
 
-def convert_docx_to_txt(url):
+def convert_docx_to_txt(url: str):
     cache_key = f"docx2txt:{url}"
     if cache.exists(cache_key):
         logging.info(f"Using cache for {url}...")
-        return pickle.loads(base64.b64decode(cache.get(cache_key)))
+        return pickle.loads(base64.b64decode(str(cache.get(cache_key))))
 
-    with tempfile.NamedTemporaryFile() as temp:
+    with NamedTemporaryFile() as temp:
         get_or_download_file(url, temp)
         with open(temp.name, 'rb') as f:
             doc = docx.Document(f)
@@ -367,14 +386,14 @@ def convert_docx_to_txt(url):
             return kwargs
 
 
-def ocr_searchable_pdf(url):
+def ocr_searchable_pdf(url: str) -> dict[str, Any]:
     cache_key = f"ocr_searchable_pdf:{url}"
     if cache.exists(cache_key):
         logging.info(f"Using cache for {url}...")
-        return pickle.loads(base64.b64decode(cache.get(cache_key)))
+        return pickle.loads(base64.b64decode(str(cache.get(cache_key))))
 
-    pages = []
-    with tempfile.TemporaryDirectory() as raster_folder, tempfile.NamedTemporaryFile() as temp:
+    pages: list[PyPDF2.PageObject] = []
+    with TemporaryDirectory() as raster_folder, NamedTemporaryFile() as temp:
         file_kwargs = get_or_download_file(url, temp)
         images = rasterize_pdf_to_images(temp.name, raster_folder)
 
@@ -382,7 +401,7 @@ def ocr_searchable_pdf(url):
         inputs = [(image, i, total) for i, image in enumerate(images)]
         for image, i, total in inputs:
             page = ocr_image_to_pdf_page(image, i, total)
-            pages.append(page)
+            pages.append(page)  # type: ignore[attr-defined]
             # Free memory by closing the image
             image.close()
             del image
@@ -393,10 +412,12 @@ def ocr_searchable_pdf(url):
 
     # get the pdf bytes
     with io.BytesIO() as f:
-        pdf_writer.write(f)
+        pdf_writer.write(f)  # type: ignore[attr-defined]
         f.seek(0)
-        headers = {k: v for k, v in file_kwargs['headers'].items(
-        ) if k.lower() not in stripped_headers}
+        headers: dict[str, Any] = dict()
+        for k, v in file_kwargs.items():
+            if k.lower() not in stripped_headers:
+                headers[k] = str(v)
         kwargs = dict(content=f.read(), headers=headers)
         logging.info(
             f"OCR complete, caching {len(kwargs['content'])} bytes under {cache_key}.")
@@ -419,23 +440,26 @@ def docx2txt_sync(req: OCRRequest):
     return make_referenced_response(req.reference, kwargs)
 
 
-def generate_pdf_from_docsend_url(url, email, passcode='', searchable=True):
+def generate_pdf_from_docsend_url(url: str, email: str, passcode: str = '', searchable: bool = True):
     credentials = docsend2pdf_credentials()
-    kwargs = dict(
-        email=email,
-        passcode=passcode,
-        searchable=searchable,
-        **credentials
-    )
-    return docsend2pdf_translate(url, **kwargs)
+    return docsend2pdf_translate(url,
+                                 email=email,
+                                 passcode=passcode,
+                                 searchable=searchable,
+                                 **credentials)
 
 
-def download_pdf_and_truncate_text(url: str, extra_context: str = '', max_tokens: int = 2048, model: str = "gpt-4") -> str:
-    text = download_pdf_and_extract_text(url, extra_context=extra_context)
-    return truncate_text(text, max_tokens=max_tokens, model=model)
+def download_pdf_and_truncate_text(url: str,
+                                   extra_context: str = '',
+                                   max_tokens: int = 2048,
+                                   model: str = "gpt-4") -> str:
+    _text = download_pdf_and_extract_text(url, extra_context=extra_context)
+    return truncate_text(_text, max_tokens=max_tokens, model=model)
 
 
-def get_or_download_file(url: str, temp: tempfile.NamedTemporaryFile = None, method='GET'):
+def get_or_download_file(url: str,
+                         temp: Any | None = None,
+                         method: str = 'GET'):
     kwargs = None
     if url.startswith('ref:'):
         kwargs = get_reference_from_cache(url[4:])
@@ -444,9 +468,10 @@ def get_or_download_file(url: str, temp: tempfile.NamedTemporaryFile = None, met
     if kwargs is None or kwargs.get('content') is None:
         raise ValueError(f"Unable to get or download {url}.")
     if temp is not None:
+        content = kwargs['content']
         logging.info(
-            f"Writing {len(kwargs['content'])} bytes to {temp.name}...")
-        temp.write(kwargs['content'])
+            f"Writing {len(content)} bytes to {temp.name}...")
+        temp.write(content)
     return kwargs
 
 
@@ -458,42 +483,42 @@ def download_pdf_and_extract_text(url: str, extra_context: str = '') -> str:
 
     # hash the inputs into a cache key
     cache_key = f"text:{hash((url, extra_context ))}"
-    text = cache.get(cache_key)
-    if (text is not None):
+    _text = cache.get(cache_key)
+    if _text is not None:
         logging.info(f"Using cache for {url}...")
-        return text
+        return str(_text)
 
-    with tempfile.NamedTemporaryFile() as temp:
+    with NamedTemporaryFile() as temp:
         get_or_download_file(url, temp)
-        text = extract_text(temp.name)
+        _text = extract_text(temp.name)
 
     # add extra text context
     # clean non-ascii characters from text
     # and remove redundant whitespace, plus trim
-    text = f"{extra_context}\n\n{text}"
-    text = re.sub(r'[^\x00-\x7F]+', ' ', text)
-    text = re.sub(r'\s+', ' ', text)
-    text = text.strip()
+    _text_agg = f"{extra_context}\n\n{_text}"
+    _text_agg = re.sub(r'[^\x00-\x7F]+', ' ', _text_agg)
+    _text_agg = re.sub(r'\s+', ' ', _text_agg)
+    _text_agg = _text_agg.strip()
 
     logging.info(
-        f"Extracted {len(text)} characters from {url}, caching under {cache_key}.")
-    cache.set(cache_key, text)
-    return text
+        f"Extracted {len(_text_agg)} characters from {url}, caching under {cache_key}.")
+    cache.set(cache_key, _text_agg)
+    return _text_agg
 
 
 def pdf_from_html(html: str, output_path: Union[str, bool] = False):
-    config = pdfkit.configuration(wkhtmltopdf=os.getenv('WKHTMLTOPDF_PATH'))
+    config = pdfkit.configuration(wkhtmltopdf=os.getenv('WKHTMLTOPDF_PATH'))  # type: ignore[attr-defined]
     options = {"load-error-handling": "ignore",
                "load-media-error-handling": "ignore"}
     # remove all image tags
     # see: https://github.com/wkhtmltopdf/wkhtmltopdf/issues/4408
     html = re.sub(r'<img[^>]*>', '', html)
-    return pdfkit.from_string(html, output_path, options=options, configuration=config)
+    return pdfkit.from_string(html, output_path, options=options, configuration=config)  # type: ignore[attr-defined]
 
 
-def download_file(url, method='GET'):
+def download_file(url: str, method: str = 'GET'):
     logging.info(f"Downloading: {method} {url}...")
-    response = requests.request(method, url)
+    response = requests.request(method, url, timeout=60)
     if response.ok:
         logging.info(f"Downloaded {len(response.content)} bytes from {url}.")
         headers = {k: v for k, v in response.headers.items() if k.lower()
@@ -507,16 +532,16 @@ def download_file(url, method='GET'):
         raise requests.HTTPError(message, response=response)
 
 
-def truncate_text(text: str, max_tokens: int = 2048, model: str = "gpt-4") -> str:
-    text = text.replace('\n', ' ')
-    text = re.sub('[\s\W]([\S\w][\s\W])+', ' ', text)
-    text = re.sub('\s+', ' ', text)
+def truncate_text(_text: str, max_tokens: int = 2048, model: str = "gpt-4") -> str:
+    _text = _text.replace('\n', ' ')
+    _text = re.sub(r'[\s\W]([\S\w][\s\W])+', ' ', _text)
+    _text = re.sub(r'\s+', ' ', _text)
     encoding = tiktoken.encoding_for_model(model)
-    tokens = encoding.encode(text)
+    tokens = encoding.encode(_text)
     trim = max_tokens - len(tokens)
     if trim >= 0:
         logging.info(f"No truncation needed, {len(tokens)} <= {max_tokens}.")
-        return text
+        return _text
 
     logging.info(f"Truncating {len(tokens)} to {max_tokens}...")
     return encoding.decode(tokens[:trim])

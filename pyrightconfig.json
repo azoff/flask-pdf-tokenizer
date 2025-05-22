@@ -1,0 +1,17 @@
+{
+  "include": [
+    "."
+  ],
+  "exclude": [
+    "**/.venv",
+    "**/__pycache__"
+  ],
+  "ignore": [
+    "pytesseract",
+    "pdfkit"
+  ],
+  "reportMissingImports": "warning",
+  "reportMissingTypeStubs": "none",
+  "pythonVersion": "3.10",
+  "typeCheckingMode": "strict"
+}
