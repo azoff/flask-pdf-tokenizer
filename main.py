@@ -168,15 +168,16 @@ def reference(key: str):
 
 def background_request(req: T,
                        background_tasks: BackgroundTasks,
-                       sync_handler: Callable[[T], Any]) -> dict[str, str]:
-    resp: dict[str, str] = {}
+                       sync_handler: Callable[[T], Any]) -> dict[str, str] | object:
     if req.asynchronous:
         background_tasks.add_task(sync_handler, req)
-        resp = dict(key=make_reference_key(req.reference))
-    else:
-        resp = sync_handler(req)
-    if 'key' in resp:
-        logging.info(f"Returning reference key {resp['key']}...")
+        reference_key = make_reference_key(req.reference)
+        logging.info(f"Returning async reference key {reference_key}...")
+        return {'key': reference_key}
+
+    resp: object = sync_handler(req)
+    response_type = str(type(resp))
+    logging.info(f"Returning synchronous response {response_type}...")
     return resp
 
 
@@ -389,7 +390,7 @@ def ocr_searchable_pdf(url: str) -> dict[str, Any]:
         f.seek(0)
         headers: dict[str, Any] = {'Content-Type': 'application/pdf'}
         file_headers: dict[str, Any] = file_kwargs.get('headers', {})  # type: ignore[attr-defined]
-        for k, v in file_headers.items():  
+        for k, v in file_headers.items():
             if k.lower() not in stripped_headers and v:
                 headers[k] = str(v)
         kwargs = dict(content=f.read(), headers=headers)
