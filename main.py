@@ -236,12 +236,42 @@ def ensure_content_downloadable(kwargs: dict[str, Any]):
         del kwargs['headers']['content']
     if 'Content-Type' not in kwargs['headers']:
         raise ValueError("Missing content-type header.")
+
+    content_type = kwargs.get('headers', {}).get('Content-Type', 'application/octet-stream')
     if 'Content-Disposition' not in kwargs['headers']:
         # get extension from content-type
-        content_type = kwargs.get('headers', dict()).get('Content-Type', '')
         extension = extension_from_mimetype(content_type)
         filename = f"{hashlib.sha256(kwargs['content']).hexdigest()}.{extension}"
         kwargs['headers']['Content-Disposition'] = f'inline; filename="{filename}"'
+
+    # If content-type is application/octet-stream, try to infer from filename extension
+    if content_type == 'application/octet-stream':
+        content_disposition = kwargs.get('headers', {}).get('Content-Disposition', '')
+        # Extract filename from Content-Disposition header
+        filename_match = re.search(r'filename="([^"]+)"', content_disposition)
+        if filename_match:
+            filename = filename_match.group(1)
+            # Get extension from filename
+            if '.' in filename:
+                extension = filename.split('.')[-1].lower()
+                # Map extension to MIME type
+                extension_to_mime = {
+                    'pdf': 'application/pdf',
+                    'docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+                    'xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                    'txt': 'text/plain',
+                    'html': 'text/html',
+                    'csv': 'text/csv',
+                    'json': 'application/json',
+                    'jpg': 'image/jpeg',
+                    'jpeg': 'image/jpeg',
+                    'png': 'image/png',
+                    'gif': 'image/gif',
+                }
+                if extension in extension_to_mime:
+                    kwargs['headers']['Content-Type'] = extension_to_mime[extension]
+                    logging.info(f"Updated Content-Type from application/octet-stream to {extension_to_mime[extension]}"
+                                 + f" based on filename extension .{extension}")
 
 
 def make_referenced_response(seed: str, kwargs: dict[str, Any] | Response) -> Response | dict[str, str]:
