@@ -9,6 +9,8 @@ import re
 from tempfile import (
     NamedTemporaryFile, TemporaryDirectory)
 from typing import Any, Callable, TypeVar, Union
+from urllib.parse import urlparse
+from typing import cast
 
 import docx
 import pandas as pd
@@ -25,6 +27,8 @@ from fastapi import BackgroundTasks, FastAPI, Response
 from pdfminer.high_level import extract_text
 from PIL import Image
 from requests import HTTPError
+import subprocess
+import shutil
 
 T = TypeVar('T', bound='BackgroundableRequest')
 
@@ -68,6 +72,10 @@ class TruncateRequest(TextRequest):
 
 
 class OCRRequest(BackgroundableRequest):
+    url: str
+
+
+class PptxRequest(BackgroundableRequest):
     url: str
 
 
@@ -145,6 +153,11 @@ def ocr(req: OCRRequest, background_tasks: BackgroundTasks):
     return background_request(req, background_tasks, ocr_sync)
 
 
+@app.post("/pptx2pdf")
+def pptx2pdf(req: PptxRequest, background_tasks: BackgroundTasks):
+    return background_request(req, background_tasks, pptx2pdf_sync)
+
+
 @app.post("/xlsx2json")
 def xlsx2json(req: OCRRequest, background_tasks: BackgroundTasks):
     return background_request(req, background_tasks, xlsx2json_sync)
@@ -215,6 +228,7 @@ def extension_from_mimetype(mime_type: str) -> str:
         'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'docx',
         'application/vnd.ms-excel': 'xls',
         'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': 'xlsx',
+        'application/vnd.openxmlformats-officedocument.presentationml.presentation': 'pptx',
         'text/plain': 'txt',
         'text/html': 'html',
         'text/csv': 'csv',
@@ -259,6 +273,7 @@ def ensure_content_downloadable(kwargs: dict[str, Any]):
                     'pdf': 'application/pdf',
                     'docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
                     'xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                    'pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
                     'txt': 'text/plain',
                     'html': 'text/html',
                     'csv': 'text/csv',
@@ -270,8 +285,82 @@ def ensure_content_downloadable(kwargs: dict[str, Any]):
                 }
                 if extension in extension_to_mime:
                     kwargs['headers']['Content-Type'] = extension_to_mime[extension]
-                    logging.info(f"Updated Content-Type from application/octet-stream to {extension_to_mime[extension]}"
-                                 + f" based on filename extension .{extension}")
+                    logging.info(
+                        "Updated Content-Type from application/octet-stream to %s "
+                        "based on filename extension .%s",
+                        extension_to_mime[extension],
+                        extension,
+                    )
+
+
+# --- PPTX to PDF support ---
+
+def _is_pptx(headers: dict[str, Any]) -> tuple[bool, str]:
+    """Return (is_pptx, suggested_basename) based on headers."""
+    ctype = headers.get('Content-Type', '')
+    if 'application/vnd.openxmlformats-officedocument.presentationml.presentation' in ctype:
+        # try to pull filename stem from content-disposition
+        cd = headers.get('Content-Disposition', '')
+        m = re.search(r'filename="([^"]+)"', cd)
+        name = m.group(1) if m else 'presentation'
+        stem = os.path.splitext(name)[0]
+        return True, stem
+    # Try by filename extension if available
+    cd = headers.get('Content-Disposition', '')
+    m = re.search(r'filename="([^"]+)"', cd)
+    if m:
+        name = m.group(1)
+        if name.lower().endswith('.pptx'):
+            return True, os.path.splitext(name)[0]
+    return False, ''
+
+
+def _convert_pptx_bytes_to_pdf(pptx_bytes: bytes, basename: str | None = None) -> bytes:
+    soffice = shutil.which('soffice') or shutil.which('libreoffice')
+    if not soffice:
+        raise RuntimeError(
+            'LibreOffice (soffice) not found. Please install libreoffice '
+            'to enable PPTX->PDF conversion.'
+        )
+    with TemporaryDirectory() as td:
+        in_path = os.path.join(td, f"{basename or 'input'}.pptx")
+        out_dir = td
+        with open(in_path, 'wb') as f:
+            f.write(pptx_bytes)
+        # Run LibreOffice headless conversion
+        cmd = [soffice, '--headless', '--convert-to', 'pdf', '--outdir', out_dir, in_path]
+        logging.info(f"Converting PPTX to PDF using LibreOffice: {' '.join(cmd)}")
+        proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        if proc.returncode != 0:
+            logging.error(proc.stderr.decode(errors='ignore'))
+            raise RuntimeError('Failed to convert PPTX to PDF via LibreOffice.')
+        # Find output PDF
+        expected_pdf = os.path.join(out_dir, f"{os.path.splitext(os.path.basename(in_path))[0]}.pdf")
+        if not os.path.exists(expected_pdf):
+            # Sometimes LibreOffice may rename; fallback to first pdf in out_dir
+            pdf_candidates = [p for p in os.listdir(out_dir) if p.lower().endswith('.pdf')]
+            if not pdf_candidates:
+                raise RuntimeError('PPTX conversion succeeded but no PDF was produced.')
+            expected_pdf = os.path.join(out_dir, pdf_candidates[0])
+        with open(expected_pdf, 'rb') as f:
+            return f.read()
+
+
+def _maybe_convert_pptx_kwargs_to_pdf(kwargs: dict[str, Any]) -> dict[str, Any]:
+    headers = kwargs.get('headers', {})
+    is_pptx, stem = _is_pptx(headers)
+    if not is_pptx:
+        return kwargs
+    pdf_bytes = _convert_pptx_bytes_to_pdf(kwargs['content'], basename=stem or None)
+    # Build new headers for PDF
+    new_headers = dict(headers)
+    new_headers['Content-Type'] = 'application/pdf'
+    filename = f"{stem or hashlib.sha256(pdf_bytes).hexdigest()}.pdf"
+    new_headers['Content-Disposition'] = f'inline; filename="{filename}"'
+    logging.info(
+        f"Converted PPTX to PDF ({len(kwargs['content'])} -> {len(pdf_bytes)} bytes)."
+    )
+    return dict(content=pdf_bytes, headers=new_headers)
 
 
 def make_referenced_response(seed: str, kwargs: dict[str, Any] | Response) -> Response | dict[str, str]:
@@ -425,7 +514,8 @@ def ocr_searchable_pdf(url: str) -> dict[str, Any]:
                 headers[k] = str(v)
         kwargs = dict(content=f.read(), headers=headers)
         logging.info(
-            f"OCR complete, caching {len(kwargs['content'])} bytes under {cache_key}.")
+            f"OCR complete, caching {len(kwargs['content'])} bytes under {cache_key}."
+        )
         cache.set(cache_key, base64.b64encode(pickle.dumps(kwargs)))
         return kwargs
 
@@ -463,11 +553,13 @@ def get_or_download_file(url: str,
         kwargs = download_file(url, method=method)
     if kwargs is None or kwargs.get('content') is None:
         raise ValueError(f"Unable to get or download {url}.")
+
     if temp is not None:
         content = kwargs['content']
         logging.info(
             f"Writing {len(content)} bytes to {temp.name}...")
         temp.write(content)
+        temp.flush()
     return kwargs
 
 
@@ -571,3 +663,43 @@ def truncate_text(_text: str, max_tokens: int = 2048, model: str = "gpt-4") -> s
 
     logging.info(f"Truncating {len(tokens)} to {max_tokens}...")
     return encoding.decode(tokens[:trim])
+
+
+def pptx2pdf_sync(req: PptxRequest):
+    # Use cache if available
+    cache_key = f"pptx2pdf:{req.url}"
+    if cache.exists(cache_key):
+        logging.info(f"Using cache for {req.url}...")
+        kwargs_cached = pickle.loads(base64.b64decode(str(cache.get(cache_key))))
+        return make_referenced_response(req.reference, kwargs_cached)
+
+    # Download the PPTX
+    file_kwargs = get_or_download_file(req.url)
+    headers = cast(dict[str, Any], file_kwargs.get('headers', {}))
+    is_pptx, stem = _is_pptx(headers)
+
+    if not is_pptx:
+        # Try from URL path
+        parsed = urlparse(req.url)
+        path = parsed.path or ''
+        if path.lower().endswith('.pptx'):
+            stem = os.path.splitext(os.path.basename(path))[0]
+            is_pptx = True
+
+    if not is_pptx:
+        raise ValueError('Provided URL does not appear to be a PPTX file.')
+
+    pdf_bytes = _convert_pptx_bytes_to_pdf(file_kwargs['content'], basename=stem or None)
+
+    filename = f"{(stem or 'presentation')}.pdf"
+    headers_out = {
+        'Content-Type': 'application/pdf',
+        'Content-Disposition': f'inline; filename="{filename}"'
+    }
+
+    kwargs = dict(content=pdf_bytes, headers=headers_out)
+    logging.info(
+        f"Converted {req.url} to PDF, caching {len(kwargs['content'])} bytes under {cache_key}."
+    )
+    cache.set(cache_key, base64.b64encode(pickle.dumps(kwargs)))
+    return make_referenced_response(req.reference, kwargs)

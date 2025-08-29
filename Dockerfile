@@ -4,12 +4,16 @@ WORKDIR /app
 
 RUN apt-get update \
 	&& apt-get install -y --no-install-recommends \
-		libjpeg-dev \ 
+		libjpeg-dev \
 		libpng-dev \
 		poppler-utils \
 		tesseract-ocr \
 		wkhtmltopdf \
 		zlib1g-dev \
+		libreoffice \
+		libreoffice-impress \
+		fonts-dejavu-core \
+		fonts-liberation \
 	&& rm -rf /var/lib/apt/lists/*
 
 ADD requirements.txt .
