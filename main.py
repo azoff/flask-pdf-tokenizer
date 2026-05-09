@@ -6,6 +6,7 @@ import logging
 import os
 import pickle
 import re
+import secrets
 from tempfile import (
     NamedTemporaryFile, TemporaryDirectory)
 from typing import Any, Callable, TypeVar, Union
@@ -23,7 +24,8 @@ import redis
 import requests
 import tiktoken
 from docsend import DocSend
-from fastapi import BackgroundTasks, FastAPI, Response
+from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Response, status
+from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pdfminer.high_level import extract_text
 from PIL import Image
 from requests import HTTPError
@@ -85,6 +87,39 @@ app = FastAPI()
 cache = redis.Redis(host=os.getenv('REDIS_HOST', 'localhost'),
                     port=6379, decode_responses=True)
 
+write_auth_scheme = HTTPBasic(auto_error=False)
+
+
+def require_write_auth(
+    credentials: HTTPBasicCredentials | None = Depends(write_auth_scheme),
+):
+    expected = os.getenv('HTTP_WRITE_AUTH', '')
+    if not expected:
+        return
+    if credentials is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail='Authentication required.',
+            headers={'WWW-Authenticate': 'Basic'},
+        )
+    expected_user, _, expected_pass = expected.partition(':')
+    user_ok = secrets.compare_digest(
+        credentials.username.encode('utf-8'),
+        expected_user.encode('utf-8'),
+    )
+    pass_ok = secrets.compare_digest(
+        credentials.password.encode('utf-8'),
+        expected_pass.encode('utf-8'),
+    )
+    if not (user_ok and pass_ok):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail='Invalid credentials.',
+        )
+
+
+write_auth = [Depends(require_write_auth)]
+
 
 @app.exception_handler(HTTPError)
 def http_exception_handler(_, exc: HTTPError):
@@ -114,14 +149,14 @@ def index():
     return {"status": "ok"}
 
 
-@app.post("/text")
+@app.post("/text", dependencies=write_auth)
 def text(req: TextRequest):
     _text = download_pdf_and_extract_text(
         req.url, extra_context=req.extra_context)
     return {"text": _text}
 
 
-@app.post("/render")
+@app.post("/render", dependencies=write_auth)
 def render(req: RenderRequest):
     encoded = req.html.encode('utf-8')
     digest = hashlib.sha256(encoded).hexdigest()
@@ -132,38 +167,38 @@ def render(req: RenderRequest):
     return make_referenced_response(req.reference, kwargs)
 
 
-@app.post("/docsend2pdf")
+@app.post("/docsend2pdf", dependencies=write_auth)
 def docsend2pdf(req: DocsendRequest, background_tasks: BackgroundTasks):
     return background_request(req, background_tasks, docsend2pdf_sync)
 
 
-@app.post("/proxy")
+@app.post("/proxy", dependencies=write_auth)
 def proxy(req: ProxyRequest):
     kwargs = get_or_download_file(req.url, method=req.method)
     return make_referenced_response(req.reference, kwargs)
 
 
-@app.post("/truncate")
+@app.post("/truncate", dependencies=write_auth)
 def truncate(req: TruncateRequest, background_tasks: BackgroundTasks):
     return background_request(req, background_tasks, truncate_sync)
 
 
-@app.post("/ocr")
+@app.post("/ocr", dependencies=write_auth)
 def ocr(req: OCRRequest, background_tasks: BackgroundTasks):
     return background_request(req, background_tasks, ocr_sync)
 
 
-@app.post("/pptx2pdf")
+@app.post("/pptx2pdf", dependencies=write_auth)
 def pptx2pdf(req: PptxRequest, background_tasks: BackgroundTasks):
     return background_request(req, background_tasks, pptx2pdf_sync)
 
 
-@app.post("/xlsx2json")
+@app.post("/xlsx2json", dependencies=write_auth)
 def xlsx2json(req: OCRRequest, background_tasks: BackgroundTasks):
     return background_request(req, background_tasks, xlsx2json_sync)
 
 
-@app.post("/docx2txt")
+@app.post("/docx2txt", dependencies=write_auth)
 def docx2txt(req: OCRRequest, background_tasks: BackgroundTasks):
     return background_request(req, background_tasks, docx2txt_sync)
 
