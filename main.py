@@ -24,7 +24,7 @@ import redis
 import requests
 import tiktoken
 from docsend import DocSend
-from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Response, status
+from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Request, Response, status
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pdfminer.high_level import extract_text
 from PIL import Image
@@ -201,6 +201,22 @@ def xlsx2json(req: OCRRequest, background_tasks: BackgroundTasks):
 @app.post("/docx2txt", dependencies=write_auth)
 def docx2txt(req: OCRRequest, background_tasks: BackgroundTasks):
     return background_request(req, background_tasks, docx2txt_sync)
+
+
+@app.post("/upload", dependencies=write_auth)
+async def upload(request: Request, reference: str = ''):
+    """Ingest raw file bytes (request body) into the reference cache.
+
+    Companion to /proxy for callers that hold a local file rather than a URL.
+    POST the file bytes as the body with a `?reference=<seed>` query param and
+    a Content-Type header; returns {"key": ...} usable as `ref:<key>` by the
+    extraction endpoints (/ocr, /docx2txt, /xlsx2json, /pptx2pdf, /text).
+    """
+    content = await request.body()
+    if not content:
+        raise HTTPException(status_code=400, detail="empty upload body")
+    content_type = request.headers.get('content-type') or 'application/octet-stream'
+    return make_referenced_response(reference, dict(content=content, headers={'Content-Type': content_type}))
 
 
 @app.get("/reference/{key}")
