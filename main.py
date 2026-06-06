@@ -433,6 +433,18 @@ def make_reference_key(seed: str) -> str:
     return hashlib.sha256(seed.encode('utf-8')).hexdigest()
 
 
+def docsend_doc_id(url: str) -> str:
+    """Extract the DocSend doc path from a view URL.
+
+    Keeps the full path after /view/ so both the simple form
+    (/view/<id>) and the spaces form (/view/<space>/d/<doc>) resolve to the
+    real deck URL. Taking only the last path segment 404s on spaces URLs.
+    """
+    if '/view/' in url:
+        return url.split('/view/', 1)[-1].split('?')[0].strip('/')
+    return url.split('/')[-1]
+
+
 def generate_pdf_from_docsend_url(url: str,
                                   email: str,
                                   passcode: str | None = None) -> dict[str, Any]:
@@ -442,7 +454,7 @@ def generate_pdf_from_docsend_url(url: str,
         logging.info(f"Using cache for {url}...")
         return pickle.loads(base64.b64decode(str(cache.get(cache_key))))
 
-    doc_id = url.split('/')[-1]
+    doc_id = docsend_doc_id(url)
     doc = DocSend(doc_id=doc_id)
     logging.info(f"Attempting to download docsend doc {doc_id}...")
 
