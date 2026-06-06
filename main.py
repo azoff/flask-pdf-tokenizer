@@ -230,6 +230,14 @@ def reference(key: str):
     return Response(**kwargs)
 
 
+# Single-flight lock: heavy synchronous ops (ocr/docsend2pdf/pptx2pdf/etc.)
+# run one at a time per container, so concurrent jobs can't saturate CPU/RAM.
+# A busy request gets 429 + Retry-After; the caller should re-enqueue. The TTL
+# is a safety release in case a holder crashes mid-op.
+HEAVY_LOCK_KEY = "pdf:heavy-lock"
+HEAVY_LOCK_TTL = int(os.getenv("PDF_HEAVY_LOCK_TTL", "900"))
+
+
 def background_request(req: T,
                        background_tasks: BackgroundTasks,
                        sync_handler: Callable[[T], Any]) -> dict[str, str] | object:
@@ -239,10 +247,17 @@ def background_request(req: T,
         logging.info(f"Returning async reference key {reference_key}...")
         return {'key': reference_key}
 
-    resp: object = sync_handler(req)
-    response_type = str(type(resp))
-    logging.info(f"Returning synchronous response {response_type}...")
-    return resp
+    if not cache.set(HEAVY_LOCK_KEY, "1", nx=True, ex=HEAVY_LOCK_TTL):
+        logging.info("Heavy op already running — returning 429 busy.")
+        raise HTTPException(status_code=429, detail="pdf service busy with another heavy job",
+                            headers={"Retry-After": "20"})
+    try:
+        resp: object = sync_handler(req)
+        response_type = str(type(resp))
+        logging.info(f"Returning synchronous response {response_type}...")
+        return resp
+    finally:
+        cache.delete(HEAVY_LOCK_KEY)
 
 
 def docsend2pdf_sync(req: DocsendRequest):
@@ -488,9 +503,16 @@ def generate_pdf_from_docsend_url(url: str,
             return dict(content=content, headers=headers)
 
 
+# Bound OCR cost so a single deck fits the caller's timeout and doesn't
+# exhaust memory: lower rasterization DPI and cap the number of pages.
+OCR_DPI = int(os.getenv("OCR_DPI", "150"))
+OCR_MAX_PAGES = int(os.getenv("OCR_MAX_PAGES", "25"))
+
+
 def rasterize_pdf_to_images(pdf_path: str, output_folder: str | None = None):
-    logging.info(f"Rasterizing PDF {pdf_path} to images...")
-    images = pdf2image.convert_from_path(pdf_path, output_folder=output_folder)  # type: ignore[attr-defined]
+    logging.info(f"Rasterizing PDF {pdf_path} to images (dpi={OCR_DPI}, max_pages={OCR_MAX_PAGES})...")
+    images = pdf2image.convert_from_path(  # type: ignore[attr-defined]
+        pdf_path, output_folder=output_folder, dpi=OCR_DPI, first_page=1, last_page=OCR_MAX_PAGES)
     logging.info(f"Rasterized PDF to {len(images)} images.")
     return images
 
